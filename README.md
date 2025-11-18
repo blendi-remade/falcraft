@@ -1,6 +1,6 @@
 # 🎨 falcraft - AI-Powered 3D Generation & Texture Remix for Minecraft
 
-A Fabric mod for Minecraft 1.21.1 that brings AI-powered 3D model generation and texture remixing directly into your game! Generate entire 3D structures from text prompts, or remix any block's texture in real-time.
+A Fabric mod for Minecraft 1.21.1 that brings AI-powered 3D model generation and texture remixing directly into your game! Now powered by **Tencent Hunyuan 3D** for cost-effective 3D generation. Generate entire 3D structures from text prompts, or remix any block's texture in real-time.
 
 [![GitHub issues](https://img.shields.io/github/issues/blendi-remade/falcraft)](https://github.com/blendi-remade/falcraft/issues)
 [![GitHub stars](https://img.shields.io/github/stars/blendi-remade/falcraft)](https://github.com/blendi-remade/falcraft/stargazers)
@@ -19,7 +19,7 @@ Watch as we transform Minecraft with AI-powered generation:
 - 🏗️ **3D Model Generation**: Generate complete 3D structures from text prompts
 - 🎨 **Perceptual Color Matching**: Uses LAB color space for human-vision-accurate block selection
 - 🎯 **Texture Remixing**: Point at any block and remix its texture with AI
-- 🤖 **Powered by fal.ai**: Uses Meshy v6 for 3D generation and nano-banana for texture editing
+- 🤖 **Powered by Tencent Hunyuan 3D**: Cost-effective 3D generation with high quality
 - ⚡ **Dynamic Resource Packs**: Texture changes apply instantly - no restart needed
 - 🧵 **Non-Blocking**: All processing runs in background threads
 
@@ -48,10 +48,11 @@ Create entire structures from text descriptions:
 - **96-128**: Maximum detail (slower placement)
 
 **How it works:**
-1. Meshy v6 generates a textured 3D model (5-10 minutes)
-2. Model is voxelized into Minecraft blocks
-3. Colors are mapped using perceptual LAB color space
-4. Structure is placed flat on the ground in your look direction
+1. Tencent Hunyuan 3D generates a textured GLB model (5-10 minutes)
+2. GLB file is parsed to extract vertices, colors, and textures
+3. Model is voxelized into Minecraft block grid
+4. Colors are mapped using perceptual LAB color space
+5. Structure is placed flat on the ground in your look direction
 
 ### Remix Block Textures
 
@@ -74,13 +75,17 @@ Transform existing block textures with AI:
    - Minecraft 1.21.1 + [Fabric Loader](https://fabricmc.net/use/) + [Fabric API](https://modrinth.com/mod/fabric-api)
    - [Java 21+](https://adoptium.net/temurin/releases/)
 
-2. **Get API Key**:
-   - Sign up at [fal.ai](https://fal.ai) and get your API key
+2. **Get Credentials**:
+   - Sign up at [Tencent Cloud](https://console.cloud.tencent.com/cam)
+   - Complete real-name verification
+   - Activate [Hunyuan 3D](https://console.cloud.tencent.com/hunyuan3d) service
+   - Get your SecretId and SecretKey
 
 3. **Configure**:
    - Create `.env` in `.minecraft/` directory:
    ```
-   FAL_API_KEY=your_api_key_here
+   TENCENT_SECRET_ID=your_secret_id
+   TENCENT_SECRET_KEY=your_secret_key
    ```
 
 4. **Install**:
@@ -93,7 +98,8 @@ Transform existing block textures with AI:
 ```bash
 git clone https://github.com/blendi-remade/falcraft.git
 cd falcraft
-echo "FAL_API_KEY=your_key" > run/.env
+echo "TENCENT_SECRET_ID=your_id" > run/.env
+echo "TENCENT_SECRET_KEY=your_key" >> run/.env
 ./gradlew runClient
 ```
 
@@ -101,16 +107,17 @@ echo "FAL_API_KEY=your_key" > run/.env
 
 ### 3D Generation Pipeline
 
-1. **Meshy v6 AI** generates textured GLB model from text prompt
-2. **Texture Extraction** pulls embedded textures from GLB binary
-3. **Voxelization** converts smooth mesh into Minecraft block grid
-4. **Perceptual Color Matching** uses LAB color space (matches human vision, not just RGB math)
-5. **Smart Placement** finds ground and places structure flat
+1. **Tencent Hunyuan 3D** generates textured GLB model from text prompt (via `ResultFormat=GLB` parameter)
+2. **GLB Parsing** extracts vertices, indices, UV coordinates, and embedded textures
+3. **Texture Extraction** pulls embedded textures from GLB binary for color sampling
+4. **Voxelization** converts smooth mesh into Minecraft block grid
+5. **Perceptual Color Matching** uses LAB color space (matches human vision, not just RGB math)
+6. **Smart Placement** finds ground and places structure flat
 
 ### Texture Remixing Pipeline
 
 1. **Raycast** finds target block and extracts texture
-2. **fal nano-banana** remixes texture with your prompt
+2. **AI Texture Editor** remixes texture with your prompt (fal.ai nano-banana)
 3. **Dynamic Resource Pack** applies changes instantly
 
 ### Why LAB Color Space?
@@ -123,18 +130,32 @@ Instead of simple RGB distance, we use **CIE LAB color space**:
 
 ## 🐛 Troubleshooting
 
-**"FAL_API_KEY not found"**
-- Create `.env` file in `.minecraft/` directory with `FAL_API_KEY=your_key`
+**"Tencent Cloud credentials not found"**
+- Create `.env` file in `.minecraft/` directory with:
+  ```
+  TENCENT_SECRET_ID=your_id
+  TENCENT_SECRET_KEY=your_key
+  ```
 
 **Texture doesn't change**
 - Check `logs/latest.log` for API errors
-- Verify API key is valid
+- Verify credentials are valid
+- Ensure Hunyuan 3D service is activated
 - Press F3+T to force reload
 
 **Model placement issues**
 - Structures place in your horizontal look direction
 - Automatically finds ground and sits flat
 - Ensure you're looking at an area with ground nearby
+
+**Region configuration**
+- Default region: `ap-guangzhou` (South China - Guangzhou)
+- To change region, modify `REGION` constant in `HunyuanAPI.java`
+
+**Model format configuration**
+- API is configured to return GLB format (`ResultFormat=GLB`)
+- GLB is the only format supported by GLBParser
+- Other available formats: OBJ, STL, USDZ, FBX, MP4 (require parser implementation)
 
 ## 🤝 Contributing
 
@@ -150,7 +171,7 @@ Ideas welcome! Fork, create a feature branch, test with `./gradlew runClient`, a
 
 **CC0 1.0 Universal** - Public domain. Use freely, modify, redistribute, no attribution required!
 
-Built with [Fabric](https://fabricmc.net/), [fal.ai](https://fal.ai/), and [Mojang Mappings](https://github.com/FabricMC/yarn).
+Built with [Fabric](https://fabricmc.net/), [Tencent Hunyuan 3D](https://cloud.tencent.com/product/hunyuan3d), and [Mojang Mappings](https://github.com/FabricMC/yarn).
 
 ## 📞 Support & Links
 

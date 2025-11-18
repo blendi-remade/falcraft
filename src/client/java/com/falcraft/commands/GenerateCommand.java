@@ -1,7 +1,7 @@
 package com.falcraft.commands;
 
 import com.falcraft.util.BlockPlacer;
-import com.falcraft.util.FalAPI;
+import com.falcraft.util.HunyuanAPI;
 import com.falcraft.util.GLBParser;
 import com.falcraft.util.TextureSampler;
 import com.falcraft.util.Voxelizer;
@@ -23,7 +23,7 @@ import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.arg
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
 /**
- * Command to generate 3D models from text prompts using fal AI
+ * Command to generate 3D models from text prompts using Tencent Hunyuan 3D
  * Usage: /fal generate <size> <prompt>
  * Size: 16-128 (recommended: 32=fast, 48=balanced, 64=detailed)
  */
@@ -53,14 +53,14 @@ public class GenerateCommand {
             try {
                 LOGGER.info("Starting 3D model generation process...");
                 
-                // Step 1: Call fal API to generate 3D model
+                // Step 1: Call Tencent Hunyuan API to generate 3D model
                 Minecraft.getInstance().execute(() -> 
-                    source.sendFeedback(Component.literal("§e[fal] Generating 3D model with AI...")));
+                    source.sendFeedback(Component.literal("§e[fal] Generating 3D model with Tencent Hunyuan...")));
                 
-                FalAPI falApi = new FalAPI();
-                FalAPI.ModelResult modelResult = falApi.generateModel(prompt);
+                HunyuanAPI hunyuanApi = new HunyuanAPI();
+                HunyuanAPI.ModelResult modelResult = hunyuanApi.generateModel(prompt);
                 
-                LOGGER.info("Received GLB model from fal API ({} bytes)", modelResult.glbData().length);
+                LOGGER.info("Received GLB model from Tencent Hunyuan ({} bytes)", modelResult.glbData().length);
                 Minecraft.getInstance().execute(() ->
                     source.sendFeedback(Component.literal("§e[fal] Model generated! Processing...")));
                 
@@ -97,18 +97,7 @@ public class GenerateCommand {
                         source.sendFeedback(Component.literal("§6[fal] Could not extract texture")));
                 }
                 
-                // DEBUG: Also download and save external texture for comparison
-                if (modelResult.textureUrl() != null) {
-                    try {
-                        LOGGER.info("DEBUG: Downloading external texture from texture_urls for comparison...");
-                        byte[] externalTexture = falApi.downloadFile(modelResult.textureUrl());
-                        Path externalPath = Paths.get("debug_texture_external.png");
-                        Files.write(externalPath, externalTexture);
-                        LOGGER.info("DEBUG: Saved external texture to: {}", externalPath.toAbsolutePath());
-                    } catch (Exception ex) {
-                        LOGGER.warn("Could not save external debug texture: {}", ex.getMessage());
-                    }
-                }
+                // Note: Tencent Hunyuan embeds textures in GLB, no external texture URLs
                 
                 // Step 3: Parse GLB file with texture sampling
                 Minecraft.getInstance().execute(() ->
@@ -151,10 +140,10 @@ public class GenerateCommand {
                 });
                 
             } catch (IllegalStateException e) {
-                // Handle missing API key
+                // Handle missing API credentials
                 Minecraft.getInstance().execute(() ->
-                    source.sendError(Component.literal("§c[fal] Error: FAL_API_KEY not found in .env file!")));
-                LOGGER.error("FAL_API_KEY not set", e);
+                    source.sendError(Component.literal("§c[fal] Error: Tencent Cloud credentials not found in .env file!")));
+                LOGGER.error("Tencent Cloud credentials not set", e);
             } catch (Exception e) {
                 String errorMsg = e.getMessage();
                 Minecraft.getInstance().execute(() ->

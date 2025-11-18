@@ -114,31 +114,69 @@ public class ClientTextureGrabber {
             
             LOGGER.info("Extracting texture: {}x{}", width, height);
             
-            // Create a new NativeImage with the sprite's dimensions
-            NativeImage image = new NativeImage(width, height, false);
-            
-            // Access the sprite's animated texture contents to get the first frame
-            // The sprite contents stores the full texture which we need to extract
+            // Try to get the original image directly using getOriginalImage() method
             try {
-                // Use reflection to access the mipmap data since it's private
-                var field = sprite.contents().getClass().getDeclaredField("byMipLevel");
-                field.setAccessible(true);
-                NativeImage[] mipmaps = (NativeImage[]) field.get(sprite.contents());
-                NativeImage sourceImage = mipmaps[0];
+                var method = sprite.contents().getClass().getDeclaredMethod("getOriginalImage");
+                method.setAccessible(true);
+                NativeImage sourceImage = (NativeImage) method.invoke(sprite.contents());
                 
-                // Copy pixel data from the sprite
-                for (int y = 0; y < height; y++) {
-                    for (int x = 0; x < width; x++) {
-                        int color = sourceImage.getPixelRGBA(x, y);
-                        image.setPixelRGBA(x, y, color);
+                if (sourceImage != null) {
+                    LOGGER.info("Successfully extracted texture using getOriginalImage()");
+                    // Create a copy of the image
+                    NativeImage image = new NativeImage(width, height, false);
+                    for (int y = 0; y < height; y++) {
+                        for (int x = 0; x < width; x++) {
+                            int color = sourceImage.getPixelRGBA(x, y);
+                            image.setPixelRGBA(x, y, color);
+                        }
                     }
+                    return image;
                 }
-            } catch (NoSuchFieldException | IllegalAccessException e) {
-                LOGGER.error("Failed to access sprite mipmap data", e);
-                return null;
+            } catch (Exception e) {
+                LOGGER.debug("getOriginalImage() method not available, trying reflection...");
             }
             
-            return image;
+            // Fallback: Try different field names for mipmap data
+            String[] possibleFieldNames = {"byMipLevel", "mipmaps", "mipLevels", "images", "f_118367_"};
+            
+            for (String fieldName : possibleFieldNames) {
+                try {
+                    var field = sprite.contents().getClass().getDeclaredField(fieldName);
+                    field.setAccessible(true);
+                    Object fieldValue = field.get(sprite.contents());
+                    
+                    if (fieldValue instanceof NativeImage[]) {
+                        NativeImage[] mipmaps = (NativeImage[]) fieldValue;
+                        if (mipmaps.length > 0 && mipmaps[0] != null) {
+                            NativeImage sourceImage = mipmaps[0];
+                            LOGGER.info("Successfully accessed mipmap data using field: {}", fieldName);
+                            
+                            // Create a new NativeImage with the sprite's dimensions
+                            NativeImage image = new NativeImage(width, height, false);
+                            
+                            // Copy pixel data from the sprite
+                            for (int y = 0; y < height; y++) {
+                                for (int x = 0; x < width; x++) {
+                                    int color = sourceImage.getPixelRGBA(x, y);
+                                    image.setPixelRGBA(x, y, color);
+                                }
+                            }
+                            return image;
+                        }
+                    }
+                } catch (NoSuchFieldException e) {
+                    // Try next field name
+                    continue;
+                }
+            }
+            
+            LOGGER.error("Could not find mipmap data field in sprite contents");
+            LOGGER.error("Available fields in {}: ", sprite.contents().getClass().getName());
+            for (var field : sprite.contents().getClass().getDeclaredFields()) {
+                LOGGER.error("  - {}: {}", field.getName(), field.getType().getSimpleName());
+            }
+            
+            return null;
         } catch (Exception e) {
             LOGGER.error("Failed to extract sprite texture", e);
             return null;

@@ -2,8 +2,8 @@
 	"schemaVersion": 1,
 	"id": "falcraft",
 	"version": "${version}",
-	"name": "Falcraft",
-	"description": "AI-powered texture remixing for Minecraft! Point at any block and remix its texture using fal.",
+	"name": "Falcraft - 混元版",
+	"description": "AI-powered 3D generation and texture remixing for Minecraft! Generate 3D models using Tencent Hunyuan 3D.",
 	"authors": [
 		"Falcraft Team"
 	],
