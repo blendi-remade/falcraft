@@ -3,10 +3,11 @@ package com.falcraft.render;
 import com.falcraft.util.BlockMapper;
 import com.falcraft.util.PlacementPreview;
 import com.falcraft.util.Voxelizer;
+import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.block.BlockRenderDispatcher;
@@ -41,7 +42,7 @@ public class GhostBlockRenderer {
      * 
      * During streaming, renders ACTUAL Minecraft block textures for a more immersive effect!
      */
-    public static void render(PoseStack poseStack, MultiBufferSource bufferSource, float partialTick) {
+    public static void render(PoseStack poseStack, MultiBufferSource bufferSource) {
         if (!PlacementPreview.isPlacementActive()) {
             return;
         }
@@ -71,7 +72,7 @@ public class GhostBlockRenderer {
         BlockPos origin = PlacementPreview.calculatePreviewOrigin();
         
         // Get camera position for proper rendering offset
-        Vec3 cameraPos = minecraft.gameRenderer.getMainCamera().getPosition();
+        Vec3 cameraPos = minecraft.gameRenderer.getMainCamera().position();
         
         // Create bounding box for the entire structure
         AABB box = new AABB(
@@ -85,12 +86,13 @@ public class GhostBlockRenderer {
         
         // Setup rendering
         poseStack.pushPose();
-        
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.enableDepthTest();
-        RenderSystem.depthMask(true);
-        
+
+        GpuDevice gpu = RenderSystem.tryGetDevice();
+        if (gpu == null) {
+            LOGGER.error("Can't get Gpu device");
+            return;
+        }
+
         // Render voxels - ALWAYS use textured blocks for best visual experience
         // This shows actual Minecraft block textures in the preview!
         if (surfaceVoxels != null && !surfaceVoxels.isEmpty()) {
@@ -98,24 +100,23 @@ public class GhostBlockRenderer {
         }
         
         // Draw bounding box and footprint outlines
-        RenderSystem.setShader(GameRenderer::getPositionColorShader);
         Matrix4f matrix = poseStack.last().pose();
         Tesselator tesselator = Tesselator.getInstance();
         
         // Draw bounding box outline (subtle, since we have ghost blocks)
         BufferBuilder lineBuffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
         drawBoxEdges(lineBuffer, matrix, box, 0.2f, 0.8f, 0.2f, 0.4f); // Dim green
-        BufferUploader.drawWithShader(lineBuffer.buildOrThrow());
+        try (MeshData meshData = lineBuffer.buildOrThrow();
+             GpuBuffer ignoredBuff = gpu.createBuffer(() -> "Bounding box vertex buffer", 32, meshData.vertexBuffer())
+        ) {}
         
         // Draw ground footprint outline
         BufferBuilder groundBuffer = tesselator.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
         drawGroundFootprint(groundBuffer, matrix, box, 1.0f, 1.0f, 0.3f, 0.8f); // Yellow
-        BufferUploader.drawWithShader(groundBuffer.buildOrThrow());
-        
-        RenderSystem.enableDepthTest();
-        RenderSystem.depthMask(true);
-        RenderSystem.disableBlend();
-        
+        try (MeshData meshData = groundBuffer.buildOrThrow();
+             GpuBuffer ignoredBuff = gpu.createBuffer(() -> "Draw ground footprint vertex buffer", 32, meshData.vertexBuffer())
+        ) {}
+
         poseStack.popPose();
     }
     
