@@ -9,7 +9,7 @@ import com.falcraft.util.PlacementPreview;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
@@ -32,11 +32,10 @@ public class FalcraftClient implements ClientModInitializer {
         });
         
         // Register ghost block renderer for placement preview
-        WorldRenderEvents.AFTER_TRANSLUCENT.register(context -> {
+        WorldRenderEvents.END_MAIN.register(context -> {
             GhostBlockRenderer.render(
-                context.matrixStack(),
-                context.consumers(),
-                context.tickCounter().getGameTimeDeltaPartialTick(true)
+                    context.matrices(),
+                    context.consumers()
             );
         });
         
@@ -62,7 +61,7 @@ public class FalcraftClient implements ClientModInitializer {
                 if (PlacementPreview.isStreaming()) {
                     // Detect G key for rotation during streaming
                     boolean isRotateKeyPressed = org.lwjgl.glfw.GLFW.glfwGetKey(
-                        Minecraft.getInstance().getWindow().getWindow(),
+                        Minecraft.getInstance().getWindow().handle(),
                         org.lwjgl.glfw.GLFW.GLFW_KEY_G
                     ) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
                     
@@ -94,7 +93,7 @@ public class FalcraftClient implements ClientModInitializer {
                 
                 // Detect G key for rotation (not R, as R conflicts with shader reload)
                 boolean isRotateKeyPressed = org.lwjgl.glfw.GLFW.glfwGetKey(
-                    Minecraft.getInstance().getWindow().getWindow(),
+                    Minecraft.getInstance().getWindow().handle(),
                     org.lwjgl.glfw.GLFW.GLFW_KEY_G
                 ) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
                 

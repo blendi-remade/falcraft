@@ -4,12 +4,13 @@ import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.block.BlockModelShaper;
 import net.minecraft.client.renderer.block.model.BakedQuad;
+import net.minecraft.client.renderer.block.model.BlockModelPart;
+import net.minecraft.client.renderer.block.model.BlockStateModel;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
-import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -110,14 +111,14 @@ public class ClientTextureGrabber {
         }
         
         BlockState blockState = minecraft.level.getBlockState(pos);
-        ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(blockState.getBlock());
+        Identifier blockId = BuiltInRegistries.BLOCK.getKey(blockState.getBlock());
         String blockName = blockId.getPath();
         
         LOGGER.info("Player is looking at block: {}", blockId);
         
         // Get the block's baked model (contains all face quads)
         BlockModelShaper modelShaper = minecraft.getBlockRenderer().getBlockModelShaper();
-        BakedModel model = modelShaper.getBlockModel(blockState);
+        BlockStateModel model = modelShaper.getBlockModel(blockState);
         
         if (model == null) {
             LOGGER.error("Could not get model for block: {}", blockId);
@@ -127,23 +128,28 @@ public class ClientTextureGrabber {
         // Collect all unique textures from all faces
         Map<String, TextureAtlasSprite> uniqueSprites = new LinkedHashMap<>();
         RandomSource random = RandomSource.create();
-        
+
         // Check all 6 directional faces
+        List<BlockModelPart> parts = model.collectParts(random);
         for (Direction dir : Direction.values()) {
-            List<BakedQuad> quads = model.getQuads(blockState, dir, random);
+            for (BlockModelPart part : parts) {
+                List<BakedQuad> quads = part.getQuads(dir);
+                for (BakedQuad quad : quads) {
+                    TextureAtlasSprite sprite = quad.sprite();
+                    String textureName = extractTextureName(sprite.contents().name());
+                    uniqueSprites.putIfAbsent(textureName, sprite);
+                }
+            }
+        }
+
+        // Check null direction (for overlays, general quads)
+        for (BlockModelPart part : parts) {
+            List<BakedQuad> quads = part.getQuads(null);
             for (BakedQuad quad : quads) {
-                TextureAtlasSprite sprite = quad.getSprite();
+                TextureAtlasSprite sprite = quad.sprite();
                 String textureName = extractTextureName(sprite.contents().name());
                 uniqueSprites.putIfAbsent(textureName, sprite);
             }
-        }
-        
-        // Check null direction (for overlays, general quads)
-        List<BakedQuad> generalQuads = model.getQuads(blockState, null, random);
-        for (BakedQuad quad : generalQuads) {
-            TextureAtlasSprite sprite = quad.getSprite();
-            String textureName = extractTextureName(sprite.contents().name());
-            uniqueSprites.putIfAbsent(textureName, sprite);
         }
         
         LOGGER.info("Found {} unique textures for block {}", uniqueSprites.size(), blockId);
@@ -185,10 +191,10 @@ public class ClientTextureGrabber {
     }
     
     /**
-     * Extracts the simple texture name from a ResourceLocation path
+     * Extracts the simple texture name from a Identifier path
      * e.g., "minecraft:block/grass_block_top" -> "grass_block_top"
      */
-    private static String extractTextureName(ResourceLocation location) {
+    private static String extractTextureName(Identifier location) {
         String path = location.getPath();
         if (path.contains("/")) {
             return path.substring(path.lastIndexOf("/") + 1);
@@ -221,7 +227,7 @@ public class ClientTextureGrabber {
         }
         
         BlockState blockState = minecraft.level.getBlockState(pos);
-        ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(blockState.getBlock());
+        Identifier blockId = BuiltInRegistries.BLOCK.getKey(blockState.getBlock());
         
         LOGGER.info("Player is looking at block: {}", blockId);
         
@@ -234,7 +240,7 @@ public class ClientTextureGrabber {
             return null;
         }
         
-        ResourceLocation spriteName = sprite.contents().name();
+        Identifier spriteName = sprite.contents().name();
         LOGGER.info("Found texture sprite: {}", spriteName);
         
         // Extract the texture as a NativeImage
@@ -293,8 +299,8 @@ public class ClientTextureGrabber {
                 // Copy pixel data from the sprite
                 for (int y = 0; y < height; y++) {
                     for (int x = 0; x < width; x++) {
-                        int color = sourceImage.getPixelRGBA(x, y);
-                        image.setPixelRGBA(x, y, color);
+                        int color = sourceImage.getPixel(x, y);
+                        image.setPixel(x, y, color);
                     }
                 }
             } catch (NoSuchFieldException | IllegalAccessException e) {
