@@ -1,9 +1,6 @@
 package com.falcraft;
 
-import com.falcraft.commands.ConfigCommand;
-import com.falcraft.commands.GenerateCommand;
-import com.falcraft.commands.RemixCommand;
-import com.falcraft.commands.StreamCommand;
+import com.falcraft.commands.*;
 import com.falcraft.render.GhostBlockRenderer;
 import com.falcraft.util.PlacementPreview;
 import net.fabricmc.api.ClientModInitializer;
@@ -28,6 +25,7 @@ public class FalcraftClient implements ClientModInitializer {
             ConfigCommand.register(dispatcher);
             // RemixCommand.register(dispatcher);  // Coming in v1.1.0
             GenerateCommand.register(dispatcher);
+            LoadCommand.register(dispatcher);
             StreamCommand.register(dispatcher);  // Streaming 3D generation
         });
         
