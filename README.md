@@ -1,6 +1,6 @@
 # 🎨 falcraft - AI-Powered 3D Generation for Minecraft
 
-A Fabric mod for Minecraft 1.21.1 that brings AI-powered 3D model generation directly into your game. Powered by [fal.ai](https://fal.ai).
+A Fabric mod for Minecraft 1.21.1 that brings 3D model generation directly into your game. Powered by [fal.ai](https://fal.ai).
 
 [![GitHub stars](https://img.shields.io/github/stars/blendi-remade/falcraft)](https://github.com/blendi-remade/falcraft/stargazers)
 ![Minecraft Version](https://img.shields.io/badge/Minecraft-1.21.1-brightgreen)
