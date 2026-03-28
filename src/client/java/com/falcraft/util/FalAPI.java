@@ -25,6 +25,8 @@ public class FalAPI {
     private static final String FAL_ZIMAGE_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/z-image/turbo";
     private static final String FAL_SAM3_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/sam-3/3d-objects";
     private static final String FAL_VLM_QUEUE_SUBMIT = "https://queue.fal.run/openrouter/router/vision";
+    private static final String FAL_NANOBANANA_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/nano-banana-pro";
+    private static final String FAL_HUNYUAN_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/hunyuan-3d/v3.1/pro/image-to-3d";
     private static final Gson GSON = new Gson();
     private final HttpClient httpClient;
     private final String apiKey;
@@ -653,6 +655,202 @@ public class FalAPI {
         }
         
         return result;
+    }
+
+    // ==================== CRAFT MODE: Nano Banana Pro + Hunyuan 3D Pipeline ====================
+
+    /**
+     * Generates an image from a text prompt using Nano Banana Pro (Gemini 3 Pro Image)
+     * Optimized for 3D conversion with white background and diagonal view
+     * @param prompt The base prompt (will be augmented for 3D-friendly output)
+     * @return The URL of the generated image
+     */
+    public String generateImageWithNanoBanana(String prompt) throws IOException, InterruptedException {
+        String augmentedPrompt = prompt + " image with plain white background, view from diagonally above";
+
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("prompt", augmentedPrompt);
+        requestBody.addProperty("num_images", 1);
+        requestBody.addProperty("aspect_ratio", "1:1");
+        requestBody.addProperty("output_format", "png");
+        requestBody.addProperty("resolution", "1K");
+
+        String requestBodyJson = GSON.toJson(requestBody);
+
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(FAL_NANOBANANA_QUEUE_SUBMIT))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBodyJson))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("Nano Banana Pro queue submit error: {} - {}", submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit Nano Banana Pro request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        // Poll for completion
+        boolean completed = false;
+        int attempts = 0;
+        int maxAttempts = 60; // 60 attempts * 2 seconds = 2 minutes max
+
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(2000);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException("Nano Banana Pro generation failed");
+                }
+            }
+        }
+
+        if (!completed) {
+            throw new IOException("Nano Banana Pro generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get Nano Banana Pro result: {} - {}", resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get Nano Banana Pro result from fal");
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        String imageUrl = resultJson.getAsJsonArray("images")
+                .get(0).getAsJsonObject()
+                .get("url").getAsString();
+
+        LOGGER.info("Nano Banana Pro image generated: {}", imageUrl);
+        return imageUrl;
+    }
+
+    /**
+     * Converts an image to a 3D model using Hunyuan 3D v3.1 Pro
+     * Produces high-quality UV-textured GLB models
+     * @param imageUrl The URL of the front-view source image
+     * @return ModelResult containing the GLB data
+     */
+    public ModelResult generate3DWithHunyuan(String imageUrl) throws IOException, InterruptedException {
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("input_image_url", imageUrl);
+        requestBody.addProperty("generate_type", "Normal");
+        requestBody.addProperty("enable_pbr", false);
+
+        String requestBodyJson = GSON.toJson(requestBody);
+
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(FAL_HUNYUAN_QUEUE_SUBMIT))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBodyJson))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("Hunyuan 3D queue submit error: {} - {}", submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit Hunyuan 3D request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        // Poll for completion (Hunyuan 3D can take a few minutes)
+        boolean completed = false;
+        int attempts = 0;
+        int maxAttempts = 120; // 120 attempts * 3 seconds = 6 minutes max
+
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(3000);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException("Hunyuan 3D generation failed");
+                }
+            }
+        }
+
+        if (!completed) {
+            throw new IOException("Hunyuan 3D generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get Hunyuan 3D result: {} - {}", resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get Hunyuan 3D result from fal: " + resultResponse.statusCode());
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        String glbUrl = resultJson.getAsJsonObject("model_glb")
+                .get("url").getAsString();
+
+        LOGGER.info("Hunyuan 3D model generated, downloading GLB...");
+        byte[] glbData = downloadFile(glbUrl);
+
+        // Hunyuan produces UV-textured GLB with embedded textures
+        return new ModelResult(glbData, null);
+    }
+
+    /**
+     * Full Craft pipeline: Nano Banana Pro (text→image) + Hunyuan 3D v3.1 Pro (image→3D)
+     * Higher quality than Z-Image + SAM-3D, takes a bit longer
+     * @param prompt The text prompt describing the desired 3D model
+     * @return ModelResult containing GLB data
+     */
+    public ModelResult generateModelHunyuan(String prompt) throws IOException, InterruptedException {
+        // Step 1: Generate 2D image with Nano Banana Pro
+        String imageUrl = generateImageWithNanoBanana(prompt);
+
+        // Step 2: Convert image to 3D with Hunyuan 3D v3.1 Pro
+        return generate3DWithHunyuan(imageUrl);
     }
 }
 
