@@ -21,6 +21,10 @@ public class FalcraftClient implements ClientModInitializer {
     
     private static boolean wasRightClickPressed = false;
     private static boolean wasRotateKeyPressed = false;
+    private static boolean wasPitchKeyPressed = false;
+    private static boolean wasRollKeyPressed = false;
+    private static boolean wasMoveUpKeyPressed = false;
+    private static boolean wasMoveDownKeyPressed = false;
 
     @Override
     public void onInitializeClient() {
@@ -105,13 +109,69 @@ public class FalcraftClient implements ClientModInitializer {
                     int degrees = PlacementPreview.getRotationIndex() * 90;
                     client.player.displayClientMessage(
                         Component.literal("§e[fal] Rotated to " + degrees + "°"),
-                        true // Action bar message (less intrusive)
+                        true
                     );
                 }
                 wasRotateKeyPressed = isRotateKeyPressed;
+
+                // V key: pitch (rotate around X axis)
+                boolean isPitchKeyPressed = org.lwjgl.glfw.GLFW.glfwGetKey(
+                    Minecraft.getInstance().getWindow().getWindow(),
+                    org.lwjgl.glfw.GLFW.GLFW_KEY_V
+                ) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+                if (isPitchKeyPressed && !wasPitchKeyPressed) {
+                    PlacementPreview.cyclePitch();
+                    client.player.displayClientMessage(
+                        Component.literal("§e[fal] Pitch (V) | G=yaw B=roll H/N=up/down"),
+                        true);
+                }
+                wasPitchKeyPressed = isPitchKeyPressed;
+
+                // B key: roll (rotate around Z axis)
+                boolean isRollKeyPressed = org.lwjgl.glfw.GLFW.glfwGetKey(
+                    Minecraft.getInstance().getWindow().getWindow(),
+                    org.lwjgl.glfw.GLFW.GLFW_KEY_B
+                ) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+                if (isRollKeyPressed && !wasRollKeyPressed) {
+                    PlacementPreview.cycleRoll();
+                    client.player.displayClientMessage(
+                        Component.literal("§e[fal] Roll (B) | G=yaw V=pitch H/N=up/down"),
+                        true);
+                }
+                wasRollKeyPressed = isRollKeyPressed;
+
+                // H key: move up
+                boolean isMoveUpPressed = org.lwjgl.glfw.GLFW.glfwGetKey(
+                    Minecraft.getInstance().getWindow().getWindow(),
+                    org.lwjgl.glfw.GLFW.GLFW_KEY_H
+                ) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+                if (isMoveUpPressed && !wasMoveUpKeyPressed) {
+                    PlacementPreview.moveUp();
+                    client.player.displayClientMessage(
+                        Component.literal("§e[fal] Y offset: " + PlacementPreview.getYOffset()),
+                        true);
+                }
+                wasMoveUpKeyPressed = isMoveUpPressed;
+
+                // N key: move down
+                boolean isMoveDownPressed = org.lwjgl.glfw.GLFW.glfwGetKey(
+                    Minecraft.getInstance().getWindow().getWindow(),
+                    org.lwjgl.glfw.GLFW.GLFW_KEY_N
+                ) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+                if (isMoveDownPressed && !wasMoveDownKeyPressed) {
+                    PlacementPreview.moveDown();
+                    client.player.displayClientMessage(
+                        Component.literal("§e[fal] Y offset: " + PlacementPreview.getYOffset()),
+                        true);
+                }
+                wasMoveDownKeyPressed = isMoveDownPressed;
             } else {
                 wasRightClickPressed = false;
                 wasRotateKeyPressed = false;
+                wasPitchKeyPressed = false;
+                wasRollKeyPressed = false;
+                wasMoveUpKeyPressed = false;
+                wasMoveDownKeyPressed = false;
             }
         });
         

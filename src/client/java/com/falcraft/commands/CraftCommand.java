@@ -80,17 +80,36 @@ public class CraftCommand {
                     source.sendFeedback(Component.literal("§d[fal] [3/4] Parsing 3D model...")));
 
                 // Step 3: Extract texture and parse GLB
+                // Hunyuan 3D follows standard glTF UV convention (V=0 is top), so flipV=false
                 TextureSampler textureSampler = null;
                 try {
                     byte[] embeddedTexture = GLBParser.extractEmbeddedTexture(modelResult.glbData());
                     if (embeddedTexture != null) {
-                        textureSampler = new TextureSampler(embeddedTexture);
+                        textureSampler = new TextureSampler(embeddedTexture, false);
                     }
                 } catch (Exception e) {
                     LOGGER.error("Failed to extract embedded texture: {}", e.getMessage(), e);
                 }
 
                 GLBParser.MeshData meshData = GLBParser.parse(modelResult.glbData(), textureSampler);
+
+                // Log bounding box to diagnose axis orientation
+                float[] verts = meshData.vertices();
+                float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+                float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+                for (int i = 0; i < verts.length; i += 3) {
+                    minX = Math.min(minX, verts[i]);     maxX = Math.max(maxX, verts[i]);
+                    minY = Math.min(minY, verts[i+1]);   maxY = Math.max(maxY, verts[i+1]);
+                    minZ = Math.min(minZ, verts[i+2]);   maxZ = Math.max(maxZ, verts[i+2]);
+                }
+                float rangeX = maxX - minX, rangeY = maxY - minY, rangeZ = maxZ - minZ;
+                LOGGER.info("Mesh bounding box: X=[{},{}] range={}, Y=[{},{}] range={}, Z=[{},{}] range={}",
+                    String.format("%.3f", minX), String.format("%.3f", maxX), String.format("%.3f", rangeX),
+                    String.format("%.3f", minY), String.format("%.3f", maxY), String.format("%.3f", rangeY),
+                    String.format("%.3f", minZ), String.format("%.3f", maxZ), String.format("%.3f", rangeZ));
+                LOGGER.info("Tallest axis: {} (if not Y, model needs Y/Z swap)",
+                    rangeY >= rangeX && rangeY >= rangeZ ? "Y (correct)" :
+                    rangeZ >= rangeX && rangeZ >= rangeY ? "Z (needs swap!)" : "X (unusual)");
 
                 // Step 4: Voxelize
                 final TextureSampler finalTextureSampler = textureSampler;
@@ -114,7 +133,7 @@ public class CraftCommand {
                         source.sendFeedback(Component.literal(
                                 "§a[fal] \u2713 §bCRAFT§a generation complete! " + voxelGrid.voxels().size() + " blocks ready."));
                         source.sendFeedback(Component.literal(
-                                "§e[fal] Right-click to place, G to rotate!"));
+                                "§e[fal] Right-click to place, G to rotate, T to tilt!"));
                     } catch (Exception e) {
                         String errorMsg = e.getMessage();
                         source.sendError(Component.literal("§c[fal] Error preparing placement: " + errorMsg));

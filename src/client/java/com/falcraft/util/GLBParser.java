@@ -151,8 +151,164 @@ public class GLBParser {
         byte[] binData = new byte[binChunkLength];
         buffer.get(binData);
         
+        // Diagnostic: dump full glTF structure
+        dumpGltfDiagnostics(gltf, binData);
+
         // Extract mesh data from glTF structure
         return extractMeshData(gltf, binData);
+    }
+
+    /**
+     * Dumps comprehensive diagnostic info about the glTF structure.
+     * This tells us exactly what's inside a Hunyuan (or any) GLB.
+     */
+    private static void dumpGltfDiagnostics(JsonObject gltf, byte[] binData) {
+        LOGGER.info("========== GLB DIAGNOSTICS ==========");
+        LOGGER.info("BIN chunk size: {} bytes", binData.length);
+
+        // Images
+        if (gltf.has("images")) {
+            JsonArray images = gltf.getAsJsonArray("images");
+            LOGGER.info("IMAGES: {} total", images.size());
+            JsonArray bufferViews = gltf.getAsJsonArray("bufferViews");
+            for (int i = 0; i < images.size(); i++) {
+                JsonObject img = images.get(i).getAsJsonObject();
+                String mimeType = img.has("mimeType") ? img.get("mimeType").getAsString() : "unknown";
+                String name = img.has("name") ? img.get("name").getAsString() : "unnamed";
+                if (img.has("bufferView")) {
+                    int bvIdx = img.get("bufferView").getAsInt();
+                    JsonObject bv = bufferViews.get(bvIdx).getAsJsonObject();
+                    int len = bv.get("byteLength").getAsInt();
+                    LOGGER.info("  Image[{}]: name='{}' mime='{}' bufferView={} size={}bytes", i, name, mimeType, bvIdx, len);
+                } else if (img.has("uri")) {
+                    LOGGER.info("  Image[{}]: name='{}' mime='{}' uri='{}'", i, name, mimeType, img.get("uri").getAsString().substring(0, Math.min(80, img.get("uri").getAsString().length())));
+                } else {
+                    LOGGER.info("  Image[{}]: name='{}' mime='{}' (no bufferView or uri!)", i, name, mimeType);
+                }
+            }
+        } else {
+            LOGGER.info("IMAGES: NONE");
+        }
+
+        // Textures
+        if (gltf.has("textures")) {
+            JsonArray textures = gltf.getAsJsonArray("textures");
+            LOGGER.info("TEXTURES: {} total", textures.size());
+            for (int i = 0; i < textures.size(); i++) {
+                JsonObject tex = textures.get(i).getAsJsonObject();
+                int source = tex.has("source") ? tex.get("source").getAsInt() : -1;
+                int sampler = tex.has("sampler") ? tex.get("sampler").getAsInt() : -1;
+                LOGGER.info("  Texture[{}]: source(image)={} sampler={}", i, source, sampler);
+            }
+        } else {
+            LOGGER.info("TEXTURES: NONE");
+        }
+
+        // Materials
+        if (gltf.has("materials")) {
+            JsonArray materials = gltf.getAsJsonArray("materials");
+            LOGGER.info("MATERIALS: {} total", materials.size());
+            for (int i = 0; i < materials.size(); i++) {
+                JsonObject mat = materials.get(i).getAsJsonObject();
+                String name = mat.has("name") ? mat.get("name").getAsString() : "unnamed";
+                StringBuilder sb = new StringBuilder();
+                sb.append("  Material[").append(i).append("]: name='").append(name).append("'");
+
+                if (mat.has("pbrMetallicRoughness")) {
+                    JsonObject pbr = mat.getAsJsonObject("pbrMetallicRoughness");
+                    if (pbr.has("baseColorTexture")) {
+                        int texIdx = pbr.getAsJsonObject("baseColorTexture").get("index").getAsInt();
+                        sb.append(" baseColorTexture=").append(texIdx);
+                    }
+                    if (pbr.has("baseColorFactor")) {
+                        sb.append(" baseColorFactor=").append(pbr.getAsJsonArray("baseColorFactor"));
+                    }
+                }
+                if (mat.has("normalTexture")) {
+                    int texIdx = mat.getAsJsonObject("normalTexture").get("index").getAsInt();
+                    sb.append(" normalTexture=").append(texIdx);
+                }
+                LOGGER.info(sb.toString());
+            }
+        } else {
+            LOGGER.info("MATERIALS: NONE");
+        }
+
+        // Meshes + primitives
+        if (gltf.has("meshes")) {
+            JsonArray meshes = gltf.getAsJsonArray("meshes");
+            LOGGER.info("MESHES: {} total", meshes.size());
+            for (int m = 0; m < meshes.size(); m++) {
+                JsonObject mesh = meshes.get(m).getAsJsonObject();
+                String name = mesh.has("name") ? mesh.get("name").getAsString() : "unnamed";
+                JsonArray primitives = mesh.getAsJsonArray("primitives");
+                LOGGER.info("  Mesh[{}]: name='{}' primitives={}", m, name, primitives.size());
+
+                for (int p = 0; p < primitives.size(); p++) {
+                    JsonObject prim = primitives.get(p).getAsJsonObject();
+                    JsonObject attrs = prim.getAsJsonObject("attributes");
+                    int matIdx = prim.has("material") ? prim.get("material").getAsInt() : -1;
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("    Prim[").append(p).append("]: material=").append(matIdx);
+                    sb.append(" attrs=[");
+                    for (String key : attrs.keySet()) {
+                        sb.append(key).append("(acc=").append(attrs.get(key).getAsInt()).append(") ");
+                    }
+                    sb.append("]");
+
+                    if (prim.has("indices")) {
+                        int indicesAcc = prim.get("indices").getAsInt();
+                        JsonObject acc = gltf.getAsJsonArray("accessors").get(indicesAcc).getAsJsonObject();
+                        sb.append(" indices=").append(acc.get("count").getAsInt());
+                    }
+
+                    LOGGER.info(sb.toString());
+                }
+            }
+        }
+
+        // BufferViews with stride info
+        if (gltf.has("bufferViews")) {
+            JsonArray bvs = gltf.getAsJsonArray("bufferViews");
+            int stridedCount = 0;
+            for (int i = 0; i < bvs.size(); i++) {
+                if (bvs.get(i).getAsJsonObject().has("byteStride")) stridedCount++;
+            }
+            LOGGER.info("BUFFER_VIEWS: {} total ({} with byteStride)", bvs.size(), stridedCount);
+        }
+
+        // UV range check - sample first mesh's first primitive
+        if (gltf.has("meshes")) {
+            try {
+                JsonObject firstPrim = gltf.getAsJsonArray("meshes").get(0).getAsJsonObject()
+                        .getAsJsonArray("primitives").get(0).getAsJsonObject();
+                JsonObject attrs = firstPrim.getAsJsonObject("attributes");
+                if (attrs.has("TEXCOORD_0")) {
+                    int uvAcc = attrs.get("TEXCOORD_0").getAsInt();
+                    float[] uvs = extractFloatArray(gltf, binData, uvAcc);
+                    float uMin = Float.MAX_VALUE, uMax = -Float.MAX_VALUE;
+                    float vMin = Float.MAX_VALUE, vMax = -Float.MAX_VALUE;
+                    for (int i = 0; i < uvs.length; i += 2) {
+                        uMin = Math.min(uMin, uvs[i]);
+                        uMax = Math.max(uMax, uvs[i]);
+                        vMin = Math.min(vMin, uvs[i + 1]);
+                        vMax = Math.max(vMax, uvs[i + 1]);
+                    }
+                    LOGGER.info("UV RANGE (first primitive): U=[{}, {}] V=[{}, {}]",
+                            String.format("%.4f", uMin), String.format("%.4f", uMax),
+                            String.format("%.4f", vMin), String.format("%.4f", vMax));
+                    LOGGER.info("  -> If V range is [0,1]: flipV=false is correct (glTF standard)");
+                    LOGGER.info("  -> If V goes negative or >1: UVs may use wrapping/repeat");
+                } else {
+                    LOGGER.info("UV: First primitive has NO TEXCOORD_0");
+                }
+            } catch (Exception e) {
+                LOGGER.warn("Could not analyze UV range: {}", e.getMessage());
+            }
+        }
+
+        LOGGER.info("========== END DIAGNOSTICS ==========");
     }
     
     /**
@@ -165,18 +321,20 @@ public class GLBParser {
             throw new IOException("No meshes found in glTF");
         }
         
-        // Get first mesh (we'll merge all primitives)
-        JsonObject mesh = meshes.get(0).getAsJsonObject();
-        JsonArray primitives = mesh.getAsJsonArray("primitives");
-        
         List<Float> allVertices = new ArrayList<>();
         List<Integer> allIndices = new ArrayList<>();
         List<Integer> allColors = new ArrayList<>();
         List<Float> allUVs = new ArrayList<>();
-        
+
         int vertexOffset = 0;
-        
-        // Process each primitive (submesh)
+
+        LOGGER.info("Processing {} meshes from GLB", meshes.size());
+
+        // Process ALL meshes (not just the first)
+        for (int m = 0; m < meshes.size(); m++) {
+        JsonObject mesh = meshes.get(m).getAsJsonObject();
+        JsonArray primitives = mesh.getAsJsonArray("primitives");
+
         for (int i = 0; i < primitives.size(); i++) {
             JsonObject primitive = primitives.get(i).getAsJsonObject();
             JsonObject attributes = primitive.getAsJsonObject("attributes");
@@ -251,7 +409,10 @@ public class GLBParser {
             
             vertexOffset += positions.length / 3;
         }
-        
+        } // end mesh loop
+
+        LOGGER.info("Total: {} vertices, {} indices from all meshes", vertexOffset, allIndices.size());
+
         // Convert lists to arrays
         float[] vertices = new float[allVertices.size()];
         for (int i = 0; i < allVertices.size(); i++) {
@@ -276,25 +437,31 @@ public class GLBParser {
         JsonObject accessor = gltf.getAsJsonArray("accessors").get(accessorIndex).getAsJsonObject();
         int bufferViewIndex = accessor.get("bufferView").getAsInt();
         int count = accessor.get("count").getAsInt();
-        int componentType = accessor.get("componentType").getAsInt();
         String type = accessor.get("type").getAsString();
-        
+
         int byteOffset = accessor.has("byteOffset") ? accessor.get("byteOffset").getAsInt() : 0;
-        
+
         JsonObject bufferView = gltf.getAsJsonArray("bufferViews").get(bufferViewIndex).getAsJsonObject();
         int bufferViewOffset = bufferView.has("byteOffset") ? bufferView.get("byteOffset").getAsInt() : 0;
-        
+        int byteStride = bufferView.has("byteStride") ? bufferView.get("byteStride").getAsInt() : 0;
+
         int componentsPerElement = getComponentCount(type);
-        int totalComponents = count * componentsPerElement;
-        
-        ByteBuffer buffer = ByteBuffer.wrap(binData, bufferViewOffset + byteOffset, totalComponents * 4);
+        int elementSize = componentsPerElement * 4; // 4 bytes per float
+        if (byteStride == 0) byteStride = elementSize; // tightly packed
+
+        ByteBuffer buffer = ByteBuffer.wrap(binData);
         buffer.order(ByteOrder.LITTLE_ENDIAN);
-        
-        float[] result = new float[totalComponents];
-        for (int i = 0; i < totalComponents; i++) {
-            result[i] = buffer.getFloat();
+
+        int baseOffset = bufferViewOffset + byteOffset;
+        float[] result = new float[count * componentsPerElement];
+
+        for (int i = 0; i < count; i++) {
+            buffer.position(baseOffset + i * byteStride);
+            for (int c = 0; c < componentsPerElement; c++) {
+                result[i * componentsPerElement + c] = buffer.getFloat();
+            }
         }
-        
+
         return result;
     }
     
@@ -348,24 +515,35 @@ public class GLBParser {
         int count = accessor.get("count").getAsInt();
         int componentType = accessor.get("componentType").getAsInt();
         String type = accessor.get("type").getAsString();
-        
+
         int byteOffset = accessor.has("byteOffset") ? accessor.get("byteOffset").getAsInt() : 0;
-        
+
         JsonObject bufferView = gltf.getAsJsonArray("bufferViews").get(bufferViewIndex).getAsJsonObject();
         int bufferViewOffset = bufferView.has("byteOffset") ? bufferView.get("byteOffset").getAsInt() : 0;
-        
+        int byteStride = bufferView.has("byteStride") ? bufferView.get("byteStride").getAsInt() : 0;
+
         int componentsPerVertex = getComponentCount(type); // 3 for VEC3, 4 for VEC4
-        int totalOffset = bufferViewOffset + byteOffset;
-        
+
+        // Calculate element size for stride
+        int componentSize = switch (componentType) {
+            case 5126 -> 4; // FLOAT
+            case 5121 -> 1; // UNSIGNED_BYTE
+            case 5123 -> 2; // UNSIGNED_SHORT
+            default -> throw new IOException("Unsupported color component type: " + componentType);
+        };
+        if (byteStride == 0) byteStride = componentsPerVertex * componentSize;
+
+        int baseOffset = bufferViewOffset + byteOffset;
+
         ByteBuffer buffer = ByteBuffer.wrap(binData);
         buffer.order(ByteOrder.LITTLE_ENDIAN);
-        buffer.position(totalOffset);
-        
+
         int[] colors = new int[count];
-        
+
         for (int i = 0; i < count; i++) {
+            buffer.position(baseOffset + i * byteStride);
             float r, g, b;
-            
+
             if (componentType == 5126) { // FLOAT
                 r = buffer.getFloat();
                 g = buffer.getFloat();
@@ -382,9 +560,9 @@ public class GLBParser {
                 b = (buffer.getShort() & 0xFFFF) / 65535.0f;
                 if (componentsPerVertex == 4) buffer.getShort(); // skip alpha
             } else {
+                // Already validated in switch above, can't reach here
                 throw new IOException("Unsupported color component type: " + componentType);
             }
-            
             int ri = Math.min(255, Math.max(0, (int) (r * 255)));
             int gi = Math.min(255, Math.max(0, (int) (g * 255)));
             int bi = Math.min(255, Math.max(0, (int) (b * 255)));

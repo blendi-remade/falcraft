@@ -661,12 +661,12 @@ public class FalAPI {
 
     /**
      * Generates an image from a text prompt using Nano Banana Pro (Gemini 3 Pro Image)
-     * Optimized for 3D conversion with white background and diagonal view
+     * Optimized for Hunyuan 3D: front-facing view with clean background
      * @param prompt The base prompt (will be augmented for 3D-friendly output)
      * @return The URL of the generated image
      */
     public String generateImageWithNanoBanana(String prompt) throws IOException, InterruptedException {
-        String augmentedPrompt = prompt + " image with plain white background, view from diagonally above";
+        String augmentedPrompt = prompt + ", centered, plain white background, single subject";
 
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("prompt", augmentedPrompt);

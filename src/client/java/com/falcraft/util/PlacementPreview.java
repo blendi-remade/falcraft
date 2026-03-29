@@ -28,7 +28,10 @@ public class PlacementPreview {
     private static Voxelizer.VoxelGrid pendingGrid = null;
     private static Map<BlockPos, Integer> surfaceVoxels = null; // Pre-computed surface for preview
     private static boolean isActive = false;
-    private static int rotationIndex = 0; // 0=0°, 1=90°, 2=180°, 3=270° (clockwise around Y axis)
+    private static int rotationIndex = 0; // 0=0°, 1=90°, 2=180°, 3=270° (yaw, clockwise around Y axis)
+    private static int pitchIndex = 0;  // 0=0°, 1=90°, 2=180°, 3=270° (pitch, around X axis)
+    private static int rollIndex = 0;   // 0=0°, 1=90°, 2=180°, 3=270° (roll, around Z axis)
+    private static int yOffset = 0;     // Vertical translation offset in blocks
     
     // Streaming mode state
     private static boolean isStreaming = false;
@@ -64,8 +67,11 @@ public class PlacementPreview {
         pendingGrid = grid;
         isActive = true;
         isStreaming = false;
-        rotationIndex = 0; // Reset rotation
-        
+        rotationIndex = 0;
+        pitchIndex = 0;
+        rollIndex = 0;
+        yOffset = 0;
+
         // Pre-compute surface voxels for preview rendering
         surfaceVoxels = extractSurfaceVoxels(grid);
         LOGGER.info("Started placement preview mode with {} voxels, {} surface voxels", 
@@ -670,7 +676,94 @@ public class PlacementPreview {
         rotationIndex = (rotationIndex + 1) % 4;
         LOGGER.info("Rotated structure to {} degrees", rotationIndex * 90);
     }
-    
+
+    /**
+     * Cycles pitch (X axis rotation). Press V during placement preview.
+     */
+    public static void cyclePitch() {
+        if (!isActive) return;
+        pitchIndex = (pitchIndex + 1) % 4;
+        recomputeTransformedSurface();
+        LOGGER.info("Pitch: {}°, Roll: {}°, Yaw: {}°", pitchIndex * 90, rollIndex * 90, rotationIndex * 90);
+    }
+
+    /**
+     * Cycles roll (Z axis rotation). Press B during placement preview.
+     */
+    public static void cycleRoll() {
+        if (!isActive) return;
+        rollIndex = (rollIndex + 1) % 4;
+        recomputeTransformedSurface();
+        LOGGER.info("Pitch: {}°, Roll: {}°, Yaw: {}°", pitchIndex * 90, rollIndex * 90, rotationIndex * 90);
+    }
+
+    /**
+     * Moves the structure up by 1 block. Press H during placement preview.
+     */
+    public static void moveUp() {
+        if (!isActive) return;
+        yOffset++;
+        LOGGER.info("Y offset: {}", yOffset);
+    }
+
+    /**
+     * Moves the structure down by 1 block. Press N during placement preview.
+     */
+    public static void moveDown() {
+        if (!isActive) return;
+        yOffset--;
+        LOGGER.info("Y offset: {}", yOffset);
+    }
+
+    public static int getYOffset() {
+        return yOffset;
+    }
+
+    /**
+     * Re-computes surface voxels after pitch/roll change.
+     */
+    private static void recomputeTransformedSurface() {
+        if (pendingGrid != null) {
+            Map<BlockPos, Integer> transformed = applyPitchAndRoll(pendingGrid.voxels(), pendingGrid.size());
+            Voxelizer.VoxelGrid transformedGrid = new Voxelizer.VoxelGrid(transformed, pendingGrid.size());
+            surfaceVoxels = extractSurfaceVoxels(transformedGrid);
+        }
+    }
+
+    /**
+     * Applies pitch (X axis) then roll (Z axis) rotation to voxel positions.
+     */
+    private static Map<BlockPos, Integer> applyPitchAndRoll(Map<BlockPos, Integer> voxels, int gridSize) {
+        if (pitchIndex == 0 && rollIndex == 0) return voxels;
+
+        Map<BlockPos, Integer> result = new HashMap<>();
+        int s = gridSize - 1;
+
+        for (Map.Entry<BlockPos, Integer> entry : voxels.entrySet()) {
+            BlockPos pos = entry.getKey();
+            int x = pos.getX(), y = pos.getY(), z = pos.getZ();
+
+            // Apply pitch (rotate around X axis)
+            int px = x, py = y, pz = z;
+            switch (pitchIndex) {
+                case 1 -> { py = s - z; pz = y; }       // 90°
+                case 2 -> { py = s - y; pz = s - z; }   // 180°
+                case 3 -> { py = z; pz = s - y; }       // 270°
+            }
+
+            // Apply roll (rotate around Z axis)
+            int rx = px, ry = py, rz = pz;
+            switch (rollIndex) {
+                case 1 -> { rx = py; ry = s - px; }     // 90°
+                case 2 -> { rx = s - px; ry = s - py; } // 180°
+                case 3 -> { rx = s - py; ry = px; }     // 270°
+            }
+
+            result.put(new BlockPos(rx, ry, rz), entry.getValue());
+        }
+        return result;
+    }
+
     /**
      * Gets the current rotation index (0=0°, 1=90°, 2=180°, 3=270°)
      */
@@ -743,19 +836,22 @@ public class PlacementPreview {
      */
     public static void confirmPlacement() {
         if (isActive && pendingGrid != null) {
-            LOGGER.info("Starting animated placement of {} blocks (rotation: {}°)", 
-                pendingGrid.voxels().size(), rotationIndex * 90);
-            
+            LOGGER.info("Starting animated placement of {} blocks (rotation: {}°, pitch: {}°)",
+                pendingGrid.voxels().size(), rotationIndex * 90, pitchIndex * 90);
+
             // Calculate placement origin and save rotation state
-            placementOrigin = calculatePreviewOrigin();
+            BlockPos baseOrigin = calculatePreviewOrigin();
+            placementOrigin = baseOrigin.offset(0, yOffset, 0);
             placementRotation = rotationIndex;
             placementGridSize = pendingGrid.size();
-            
+
+            // Apply pitch and roll to voxels before placement
+            Map<BlockPos, Integer> voxelsToPlace = applyPitchAndRoll(pendingGrid.voxels(), pendingGrid.size());
+
             // Sort voxels by Y coordinate (bottom to top)
-            // Note: Y doesn't change with Y-axis rotation, so original Y is fine
             Map<Integer, List<Map.Entry<BlockPos, Integer>>> voxelsByY = new TreeMap<>();
-            
-            for (Map.Entry<BlockPos, Integer> entry : pendingGrid.voxels().entrySet()) {
+
+            for (Map.Entry<BlockPos, Integer> entry : voxelsToPlace.entrySet()) {
                 BlockPos voxelPos = entry.getKey();
                 int y = voxelPos.getY();
                 voxelsByY.computeIfAbsent(y, k -> new ArrayList<>()).add(entry);
