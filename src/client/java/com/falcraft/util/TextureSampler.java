@@ -17,20 +17,31 @@ public class TextureSampler {
     private final BufferedImage image;
     private final int width;
     private final int height;
-    
+    private final boolean flipV;
+
     /**
-     * Creates a texture sampler from PNG data
-     * @param pngData The PNG file as a byte array
+     * Creates a texture sampler from image data.
+     * @param imageData The image file as a byte array (PNG, JPEG, etc.)
+     * @param flipV If true, flips V coordinate (1-v). Use true for OpenGL-convention
+     *              models (Meshy-6), false for standard glTF (Hunyuan 3D).
      * @throws IOException If the image cannot be loaded
      */
-    public TextureSampler(byte[] pngData) throws IOException {
-        this.image = ImageIO.read(new ByteArrayInputStream(pngData));
+    public TextureSampler(byte[] imageData, boolean flipV) throws IOException {
+        this.image = ImageIO.read(new ByteArrayInputStream(imageData));
         if (this.image == null) {
             throw new IOException("Failed to load texture image");
         }
         this.width = image.getWidth();
         this.height = image.getHeight();
-        LOGGER.info("Loaded texture: {}x{}", width, height);
+        this.flipV = flipV;
+        LOGGER.info("Loaded texture: {}x{} (flipV={})", width, height, flipV);
+    }
+
+    /**
+     * Creates a texture sampler with V-flip enabled (legacy behavior).
+     */
+    public TextureSampler(byte[] imageData) throws IOException {
+        this(imageData, true);
         
         // Analyze texture color distribution
         analyzeTexture();
@@ -85,9 +96,10 @@ public class TextureSampler {
         v = Math.max(0.0f, Math.min(1.0f, v));
         
         // Convert UV to pixel coordinates
-        // Note: V is flipped (1.0 - v) because image Y axis is inverted
+        // glTF standard: V=0 is top (same as image Y=0), no flip needed
+        // OpenGL/legacy: V=0 is bottom, needs 1-v flip
         int x = (int) (u * (width - 1));
-        int y = (int) ((1.0f - v) * (height - 1));
+        int y = (int) ((flipV ? (1.0f - v) : v) * (height - 1));
         
         // Get RGB from image (removing alpha channel)
         // Use colors directly from AI texture without any adjustments

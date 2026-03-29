@@ -68,7 +68,7 @@ public class GhostBlockRenderer {
         Minecraft minecraft = Minecraft.getInstance();
         
         // Calculate preview origin (locked during streaming, dynamic after)
-        BlockPos origin = PlacementPreview.calculatePreviewOrigin();
+        BlockPos origin = PlacementPreview.calculatePreviewOrigin().offset(0, PlacementPreview.getYOffset(), 0);
         
         // Get camera position for proper rendering offset
         Vec3 cameraPos = minecraft.gameRenderer.getMainCamera().getPosition();
