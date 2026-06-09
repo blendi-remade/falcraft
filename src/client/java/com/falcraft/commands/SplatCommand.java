@@ -61,18 +61,18 @@ public class SplatCommand {
 
         source.sendFeedback(Component.literal("§d[fal] Starting §bSPLAT§d generation (" + size + "x" + size + "x" + size + ")"));
         source.sendFeedback(Component.literal("§d[fal] Prompt: \"" + prompt + "\""));
-        source.sendFeedback(Component.literal("§d[fal] Using Nano Banana Pro + TripoSplat"));
+        source.sendFeedback(Component.literal("§d[fal] Using FLUX.2 klein + TripoSplat"));
 
         new Thread(() -> {
             try {
                 LOGGER.info("Starting Splat pipeline...");
 
-                // Step 1: Generate image with Nano Banana Pro
+                // Step 1: Generate image with FLUX.2 [klein] (fast 4-step)
                 Minecraft.getInstance().execute(() ->
-                    source.sendFeedback(Component.literal("§d[fal] [1/4] Generating image with Nano Banana Pro...")));
+                    source.sendFeedback(Component.literal("§d[fal] [1/4] Generating image with FLUX.2 klein...")));
 
                 FalAPI falApi = new FalAPI();
-                String imageUrl = falApi.generateImageWithNanoBanana(prompt);
+                String imageUrl = falApi.generateImageWithFluxKlein(prompt);
 
                 // Step 2: Convert to a Gaussian splat with TripoSplat
                 Minecraft.getInstance().execute(() ->

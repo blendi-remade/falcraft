@@ -28,6 +28,7 @@ public class FalAPI {
     private static final String FAL_NANOBANANA_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/nano-banana-pro";
     private static final String FAL_HUNYUAN_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/hunyuan-3d/v3.1/pro/image-to-3d";
     private static final String FAL_TRIPOSPLAT_QUEUE_SUBMIT = "https://queue.fal.run/tripo3d/triposplat";
+    private static final String FAL_FLUX_KLEIN_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/flux-2/klein/9b";
     private static final Gson GSON = new Gson();
     private final HttpClient httpClient;
     private final String apiKey;
@@ -854,7 +855,101 @@ public class FalAPI {
         return generate3DWithHunyuan(imageUrl);
     }
 
-    // ==================== SPLAT MODE: Nano Banana Pro + TripoSplat Pipeline ====================
+    // ==================== SPLAT MODE: FLUX.2 [klein] + TripoSplat Pipeline ====================
+
+    /**
+     * Generates an image from a text prompt using FLUX.2 [klein] 9B (fast 4-step distilled model).
+     * Used by /fal splat for a faster text->image stage than Nano Banana Pro.
+     * Augments the prompt for 3D-friendly output (single centered subject, clean background).
+     *
+     * @param prompt The base prompt (will be augmented)
+     * @return The URL of the generated image
+     */
+    public String generateImageWithFluxKlein(String prompt) throws IOException, InterruptedException {
+        String augmentedPrompt = prompt + ", centered, plain white background, single subject";
+
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("prompt", augmentedPrompt);
+        requestBody.addProperty("num_inference_steps", 4);
+        requestBody.addProperty("image_size", "square_hd");
+        requestBody.addProperty("num_images", 1);
+        requestBody.addProperty("enable_safety_checker", true);
+        requestBody.addProperty("output_format", "png");
+
+        String requestBodyJson = GSON.toJson(requestBody);
+
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(FAL_FLUX_KLEIN_QUEUE_SUBMIT))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBodyJson))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("FLUX klein queue submit error: {} - {}", submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit FLUX klein request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        // Poll for completion (klein is fast: 4 steps)
+        boolean completed = false;
+        int attempts = 0;
+        int maxAttempts = 30; // 30 * 1s = 30s max
+
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(1000);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException("FLUX klein generation failed");
+                }
+            }
+        }
+
+        if (!completed) {
+            throw new IOException("FLUX klein generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get FLUX klein result: {} - {}", resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get FLUX klein result from fal");
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        String imageUrl = resultJson.getAsJsonArray("images")
+                .get(0).getAsJsonObject()
+                .get("url").getAsString();
+
+        LOGGER.info("FLUX klein image generated: {}", imageUrl);
+        return imageUrl;
+    }
 
     /**
      * Converts an image to a 3D Gaussian splat using TripoSplat (tripo3d/triposplat).
@@ -962,8 +1057,8 @@ public class FalAPI {
      * @return The raw .splat file as a byte array
      */
     public byte[] generateSplatModel(String prompt, int numGaussians) throws IOException, InterruptedException {
-        // Step 1: Generate 2D image with Nano Banana Pro
-        String imageUrl = generateImageWithNanoBanana(prompt);
+        // Step 1: Generate 2D image with FLUX.2 [klein] (fast 4-step)
+        String imageUrl = generateImageWithFluxKlein(prompt);
 
         // Step 2: Convert image to a Gaussian splat with TripoSplat
         return generateSplatWithTripoSplat(imageUrl, numGaussians);
