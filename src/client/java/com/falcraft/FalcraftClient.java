@@ -4,6 +4,7 @@ import com.falcraft.commands.ConfigCommand;
 import com.falcraft.commands.GenerateCommand;
 import com.falcraft.commands.RemixCommand;
 import com.falcraft.commands.CraftCommand;
+import com.falcraft.commands.SplatCommand;
 import com.falcraft.commands.StreamCommand;
 import com.falcraft.render.GhostBlockRenderer;
 import com.falcraft.util.PlacementPreview;
@@ -35,6 +36,7 @@ public class FalcraftClient implements ClientModInitializer {
             GenerateCommand.register(dispatcher);
             StreamCommand.register(dispatcher);  // Streaming 3D generation
             CraftCommand.register(dispatcher);   // Nano Banana Pro + Hunyuan 3D
+            SplatCommand.register(dispatcher);   // Nano Banana Pro + TripoSplat (experimental)
         });
         
         // Register ghost block renderer for placement preview

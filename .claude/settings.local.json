@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./gradlew build:*)"
+      "Bash(./gradlew build:*)",
+      "PowerShell(.\\\\gradlew build)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

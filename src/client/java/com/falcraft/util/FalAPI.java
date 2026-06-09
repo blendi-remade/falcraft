@@ -27,6 +27,7 @@ public class FalAPI {
     private static final String FAL_VLM_QUEUE_SUBMIT = "https://queue.fal.run/openrouter/router/vision";
     private static final String FAL_NANOBANANA_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/nano-banana-pro";
     private static final String FAL_HUNYUAN_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/hunyuan-3d/v3.1/pro/image-to-3d";
+    private static final String FAL_TRIPOSPLAT_QUEUE_SUBMIT = "https://queue.fal.run/tripo3d/triposplat";
     private static final Gson GSON = new Gson();
     private final HttpClient httpClient;
     private final String apiKey;
@@ -851,6 +852,121 @@ public class FalAPI {
 
         // Step 2: Convert image to 3D with Hunyuan 3D v3.1 Pro
         return generate3DWithHunyuan(imageUrl);
+    }
+
+    // ==================== SPLAT MODE: Nano Banana Pro + TripoSplat Pipeline ====================
+
+    /**
+     * Converts an image to a 3D Gaussian splat using TripoSplat (tripo3d/triposplat).
+     * Returns the raw .splat file bytes (binary 32-byte-per-Gaussian format).
+     *
+     * @param imageUrl     URL of the source image (front view, clean background)
+     * @param numGaussians Target Gaussian count (rounded to nearest 32 internally)
+     * @return The raw .splat file as a byte array
+     */
+    public byte[] generateSplatWithTripoSplat(String imageUrl, int numGaussians) throws IOException, InterruptedException {
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("image_url", imageUrl);
+        requestBody.addProperty("num_gaussians", numGaussians);
+        requestBody.addProperty("num_inference_steps", 20);
+        requestBody.addProperty("guidance_scale", 3);
+        // Request the flat binary .splat format (color + opacity already decoded to bytes)
+        // rather than .ply (raw SH coefficients + logit opacity that need decoding).
+        requestBody.addProperty("output_format", "splat");
+        requestBody.addProperty("enable_safety_checker", true);
+
+        String requestBodyJson = GSON.toJson(requestBody);
+
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(FAL_TRIPOSPLAT_QUEUE_SUBMIT))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBodyJson))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("TripoSplat queue submit error: {} - {}", submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit TripoSplat request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        // Poll for completion (splat generation is typically faster than Hunyuan)
+        boolean completed = false;
+        int attempts = 0;
+        int maxAttempts = 120; // 120 attempts * 3 seconds = 6 minutes max
+
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(3000);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException("TripoSplat generation failed");
+                }
+            }
+        }
+
+        if (!completed) {
+            throw new IOException("TripoSplat generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get TripoSplat result: {} - {}", resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get TripoSplat result from fal: " + resultResponse.statusCode());
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        // Output field is named "model_mesh" in the schema (it holds the .splat/.ply file).
+        String splatUrl = resultJson.getAsJsonObject("model_mesh")
+                .get("url").getAsString();
+
+        LOGGER.info("TripoSplat generated, downloading .splat...");
+        byte[] splatData = downloadFile(splatUrl);
+        LOGGER.info("Downloaded .splat ({} bytes)", splatData.length);
+
+        return splatData;
+    }
+
+    /**
+     * Full Splat pipeline: Nano Banana Pro (text→image) + TripoSplat (image→Gaussian splat).
+     * Experimental alternative to the Hunyuan mesh path; better suited to organic/fuzzy subjects.
+     *
+     * @param prompt       The text prompt describing the desired object
+     * @param numGaussians Target Gaussian count
+     * @return The raw .splat file as a byte array
+     */
+    public byte[] generateSplatModel(String prompt, int numGaussians) throws IOException, InterruptedException {
+        // Step 1: Generate 2D image with Nano Banana Pro
+        String imageUrl = generateImageWithNanoBanana(prompt);
+
+        // Step 2: Convert image to a Gaussian splat with TripoSplat
+        return generateSplatWithTripoSplat(imageUrl, numGaussians);
     }
 }
 
