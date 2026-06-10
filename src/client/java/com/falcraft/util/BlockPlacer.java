@@ -57,9 +57,10 @@ public class BlockPlacer {
                 level = clientLevel;
             }
         } else {
-            // Multiplayer: we can only place on client side (won't persist)
-            level = minecraft.level;
-            LOGGER.warn("Multiplayer detected - blocks may not persist! Consider using a server-side mod.");
+            // Dedicated server / multiplayer
+            LOGGER.info("Sending structure placement request to server");
+            sendStructureToServer(voxelGrid, placementOrigin);
+            return voxelGrid.voxels().size();
         }
         
         if (level == null) {

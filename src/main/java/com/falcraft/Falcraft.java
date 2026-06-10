@@ -11,6 +11,7 @@ public class Falcraft implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
+	  StructurePlacementNetworking.initialize();
 		LOGGER.info("Falcraft initialized");
 	}
 }
