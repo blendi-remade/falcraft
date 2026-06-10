@@ -94,6 +94,17 @@ public class StructurePlacementNetworking {
 
                     context.server().execute(() -> {
 
+                        // Security: only allow creative-mode players or server operators
+                        // to place arbitrary blocks via this packet.
+                        if (!player.isCreative() && !context.server().getPlayerList().isOp(player.getGameProfile())) {
+                            player.sendSystemMessage(
+                                net.minecraft.network.chat.Component.literal(
+                                    "[Falcraft] Structure placement requires Creative mode or operator status."
+                                )
+                            );
+                            return;
+                        }
+
                         payload.blocks().forEach(block -> {
 
                             BlockPos pos = payload.origin().offset(

@@ -57,10 +57,11 @@ public class BlockPlacer {
                 level = clientLevel;
             }
         } else {
-            // Dedicated server / multiplayer
-            LOGGER.info("Sending structure placement request to server");
-            sendStructureToServer(voxelGrid, placementOrigin);
-            return voxelGrid.voxels().size();
+            // Dedicated server / multiplayer: PlacementPreview.tickAnimatedPlacement()
+            // handles sending the C2S packet via ClientPlayNetworking.  BlockPlacer is
+            // not used in the multiplayer path, so if we somehow end up here just warn.
+            LOGGER.warn("BlockPlacer.placeVoxelGrid called in multiplayer context; use PlacementPreview instead.");
+            return 0;
         }
         
         if (level == null) {

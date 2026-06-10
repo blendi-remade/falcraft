@@ -1,5 +1,7 @@
 package com.falcraft.util;
 
+import com.falcraft.network.StructurePlacementNetworking;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
@@ -1033,45 +1035,74 @@ public class PlacementPreview {
             return;
         }
         
-        // Get the appropriate level for block placement
+        // Determine whether we are on a dedicated server (multiplayer) or singleplayer.
+        IntegratedServer integratedServer = minecraft.getSingleplayerServer();
+        boolean isMultiplayer = (integratedServer == null);
+
+        if (isMultiplayer) {
+            // --- MULTIPLAYER path ---
+            // Collect all blocks and send them to the server in one C2S packet.
+            // The server handler in StructurePlacementNetworking will place them with
+            // proper authority, so they persist and are visible to all players.
+            List<StructurePlacementNetworking.BlockData> blockDataList = new ArrayList<>();
+
+            while (currentLayerIndex < layersByY.size()) {
+                List<Map.Entry<BlockPos, Integer>> layer = layersByY.get(currentLayerIndex);
+                for (Map.Entry<BlockPos, Integer> entry : layer) {
+                    BlockPos rotatedPos = applyPlacementRotation(entry.getKey());
+                    blockDataList.add(new StructurePlacementNetworking.BlockData(
+                        rotatedPos.getX(),
+                        rotatedPos.getY(),
+                        rotatedPos.getZ(),
+                        entry.getValue()
+                    ));
+                }
+                currentLayerIndex++;
+            }
+
+            StructurePlacementNetworking.PlaceStructurePayload payload =
+                new StructurePlacementNetworking.PlaceStructurePayload(placementOrigin, blockDataList);
+            ClientPlayNetworking.send(payload);
+
+            LOGGER.info("Sent {} blocks to server for multiplayer placement", blockDataList.size());
+
+            isAnimatingPlacement = false;
+            layersByY = null;
+            placementOrigin = null;
+            currentLayerIndex = 0;
+            return;
+        }
+
+        // --- SINGLEPLAYER path: place directly into the integrated server level, layer-by-layer ---
         Level level = getPlacementLevel(minecraft);
         if (level == null) {
             LOGGER.error("Level is null during animated placement!");
             cancelAnimatedPlacement();
             return;
         }
-        
-        // Place the next batch of layers
+
         int layersPlaced = 0;
         int blocksPlaced = 0;
-        
+
         while (currentLayerIndex < layersByY.size() && layersPlaced < LAYERS_PER_TICK) {
             List<Map.Entry<BlockPos, Integer>> layer = layersByY.get(currentLayerIndex);
-            
-            // Place all blocks in this layer
+
             for (Map.Entry<BlockPos, Integer> entry : layer) {
                 BlockPos voxelPos = entry.getKey();
                 int color = entry.getValue();
-                
-                // Apply rotation to the voxel position
+
                 BlockPos rotatedPos = applyPlacementRotation(voxelPos);
-                
-                // Calculate world position
                 BlockPos worldPos = placementOrigin.offset(rotatedPos);
-                
-                // Get the closest matching block
                 BlockState blockState = BlockMapper.getClosestBlock(color);
-                
-                // Place the block
+
                 level.setBlock(worldPos, blockState, 3);
                 blocksPlaced++;
             }
-            
+
             currentLayerIndex++;
             layersPlaced++;
         }
-        
-        // Check if we're done
+
         if (currentLayerIndex >= layersByY.size()) {
             LOGGER.info("Animated placement complete! Placed {} blocks", getTotalBlockCount());
             isAnimatingPlacement = false;

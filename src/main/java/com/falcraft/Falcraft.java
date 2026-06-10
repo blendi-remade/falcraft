@@ -1,5 +1,6 @@
 package com.falcraft;
 
+import com.falcraft.network.StructurePlacementNetworking;
 import net.fabricmc.api.ModInitializer;
 
 import org.slf4j.Logger;
