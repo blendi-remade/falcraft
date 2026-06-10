@@ -24,6 +24,10 @@ bin/
 .classpath
 .project
 
+# claude
+
+.claude/
+
 # macos
 
 *.DS_Store
