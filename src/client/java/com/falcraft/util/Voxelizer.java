@@ -175,6 +175,130 @@ public class Voxelizer {
         return new VoxelGrid(voxels, resolution);
     }
 
+    // ==================== GAUSSIAN SPLAT VOXELIZATION ====================
+
+    // Gaussians below this opacity are treated as haze/filler and dropped.
+    private static final float SPLAT_OPACITY_THRESHOLD = 0.15f;
+    // Percentile clip per axis for robust bounds (ignores stray "floater" Gaussians).
+    private static final double SPLAT_PERCENTILE_LOW = 0.01;
+    private static final double SPLAT_PERCENTILE_HIGH = 0.99;
+
+    /**
+     * Voxelizes a Gaussian splat using the centroid approach: filter out low-opacity
+     * Gaussians, compute robust (percentile-clipped) bounds to ignore floaters, scale the
+     * longest axis to {@code resolution}, drop each Gaussian's center into its cell, and
+     * average the per-cell color.
+     *
+     * Color comes straight from each Gaussian (no texture), so this is the splat analogue
+     * of the mesh vertex-color path. Saturation boost is applied since TripoSplat colors
+     * can read flat once averaged.
+     *
+     * @param splat      parsed Gaussian cloud
+     * @param resolution number of voxels spanning the longest axis
+     */
+    public static VoxelGrid voxelizeSplat(SplatParser.SplatData splat, int resolution) {
+        int n = splat.count();
+        if (n == 0) {
+            return new VoxelGrid(new HashMap<>(), resolution);
+        }
+
+        float[] pos = splat.positions();
+        float[] op = splat.opacities();
+
+        // 1) Opacity filter. Fall back to all Gaussians if the threshold is too aggressive.
+        int[] kept = new int[n];
+        int keptCount = 0;
+        for (int i = 0; i < n; i++) {
+            if (op[i] >= SPLAT_OPACITY_THRESHOLD) {
+                kept[keptCount++] = i;
+            }
+        }
+        if (keptCount < n / 20) { // fewer than 5% survived - threshold too strict, keep everything
+            for (int i = 0; i < n; i++) kept[i] = i;
+            keptCount = n;
+            LOGGER.warn("Opacity filter kept <5% of Gaussians; using full cloud instead");
+        }
+
+        // 2) Robust per-axis bounds via percentile clip (drops floaters).
+        double[] xs = new double[keptCount];
+        double[] ys = new double[keptCount];
+        double[] zs = new double[keptCount];
+        for (int k = 0; k < keptCount; k++) {
+            int i = kept[k];
+            xs[k] = pos[i * 3];
+            ys[k] = pos[i * 3 + 1];
+            zs[k] = pos[i * 3 + 2];
+        }
+        double[] xb = percentileBounds(xs);
+        double[] yb = percentileBounds(ys);
+        double[] zb = percentileBounds(zs);
+
+        double minX = xb[0], maxX = xb[1];
+        double minY = yb[0], maxY = yb[1];
+        double minZ = zb[0], maxZ = zb[1];
+
+        double maxDim = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
+        if (maxDim <= 0) {
+            return new VoxelGrid(new HashMap<>(), resolution);
+        }
+
+        double scale = resolution / maxDim;
+        int maxIndex = resolution - 1;
+
+        // 3) Drop centroids into cells, averaging color.
+        Map<BlockPos, Acc> candidates = new HashMap<>();
+        int[] colors = splat.colors();
+        for (int k = 0; k < keptCount; k++) {
+            int i = kept[k];
+            int gx = clamp((int) Math.floor((pos[i * 3] - minX) * scale), maxIndex);
+            int gy = clamp((int) Math.floor((pos[i * 3 + 1] - minY) * scale), maxIndex);
+            int gz = clamp((int) Math.floor((pos[i * 3 + 2] - minZ) * scale), maxIndex);
+
+            int rgb = colors[i];
+            BlockPos p = new BlockPos(gx, gy, gz);
+            Acc acc = candidates.get(p);
+            if (acc == null) {
+                acc = new Acc();
+                candidates.put(p, acc);
+            }
+            acc.r += (rgb >> 16) & 0xFF;
+            acc.g += (rgb >> 8) & 0xFF;
+            acc.b += rgb & 0xFF;
+            acc.count++;
+        }
+
+        Map<BlockPos, Integer> voxels = new HashMap<>(candidates.size());
+        for (Map.Entry<BlockPos, Acc> entry : candidates.entrySet()) {
+            Acc acc = entry.getValue();
+            int color = (((int) (acc.r / acc.count)) << 16)
+                    | (((int) (acc.g / acc.count)) << 8)
+                    | ((int) (acc.b / acc.count));
+            if (SATURATION_BOOST != 1.0f) {
+                color = boostSaturation(color, SATURATION_BOOST);
+            }
+            voxels.put(entry.getKey(), color);
+        }
+
+        LOGGER.info("Voxelized splat: {} Gaussians ({} after opacity filter) -> {} voxels (resolution {})",
+                n, keptCount, voxels.size(), resolution);
+
+        return new VoxelGrid(voxels, resolution);
+    }
+
+    /**
+     * Returns [low, high] bounds for a coordinate array using percentile clipping,
+     * which discards a small fraction of outliers (floaters) on each end.
+     */
+    private static double[] percentileBounds(double[] values) {
+        double[] sorted = values.clone();
+        java.util.Arrays.sort(sorted);
+        int lo = (int) Math.floor(SPLAT_PERCENTILE_LOW * (sorted.length - 1));
+        int hi = (int) Math.ceil(SPLAT_PERCENTILE_HIGH * (sorted.length - 1));
+        lo = Math.max(0, Math.min(sorted.length - 1, lo));
+        hi = Math.max(0, Math.min(sorted.length - 1, hi));
+        return new double[]{sorted[lo], sorted[hi]};
+    }
+
     private static double sq(double x) {
         return x * x;
     }
