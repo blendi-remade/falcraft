@@ -171,7 +171,7 @@ public class BlockPlacer {
         }
         
         // If no ground found within 100 blocks, place at world bottom + some height
-        return Math.max(level.getMinBuildHeight() + 5, startY - 100);
+        return Math.max(level.getMinY() + 5, startY - 100);
     }
     
     /**
