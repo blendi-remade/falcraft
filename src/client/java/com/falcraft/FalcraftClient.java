@@ -5,15 +5,20 @@ import com.falcraft.commands.GenerateCommand;
 import com.falcraft.commands.RemixCommand;
 import com.falcraft.commands.CraftCommand;
 import com.falcraft.commands.SplatCommand;
+import com.falcraft.commands.ImageCommand;
 import com.falcraft.commands.StreamCommand;
 import com.falcraft.render.GhostBlockRenderer;
+import com.falcraft.render.ImageCanvasRenderer;
+import com.falcraft.util.ImageCanvasManager;
 import com.falcraft.util.PlacementPreview;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.InteractionResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,6 +32,13 @@ public class FalcraftClient implements ClientModInitializer {
     private static boolean wasMoveUpKeyPressed = false;
     private static boolean wasMoveDownKeyPressed = false;
 
+    // Image-canvas placement key edges
+    private static boolean imgWasRightClickPressed = false;
+    private static boolean imgWasRotatePressed = false;
+    private static boolean imgWasGrowPressed = false;
+    private static boolean imgWasShrinkPressed = false;
+    private static boolean imgWasSnapPressed = false;
+
     @Override
     public void onInitializeClient() {
         // Register the client-side commands
@@ -37,8 +49,9 @@ public class FalcraftClient implements ClientModInitializer {
             StreamCommand.register(dispatcher);  // Streaming 3D generation
             CraftCommand.register(dispatcher);   // Nano Banana Pro + Hunyuan 3D
             SplatCommand.register(dispatcher);   // Nano Banana Pro + TripoSplat (experimental)
+            ImageCommand.register(dispatcher);   // AI image -> in-world canvas
         });
-        
+
         // Register ghost block renderer for placement preview
         WorldRenderEvents.AFTER_TRANSLUCENT.register(context -> {
             GhostBlockRenderer.render(
@@ -46,13 +59,36 @@ public class FalcraftClient implements ClientModInitializer {
                 context.consumers(),
                 context.tickCounter().getGameTimeDeltaPartialTick(true)
             );
+            // Render placed image canvases + live placement preview
+            ImageCanvasRenderer.render(
+                context.matrixStack(),
+                context.camera().getPosition()
+            );
+        });
+
+        // Left-click an image canvas to remove it (cancels the block-break behind it)
+        AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
+            if (world.isClientSide && !ImageCanvasManager.isPreviewActive()
+                    && ImageCanvasManager.removeLookedAt(player)) {
+                return InteractionResult.FAIL; // consume the click, don't break the wall
+            }
+            return InteractionResult.PASS;
         });
         
         // Register client tick handler for placement confirmation and animated placement
         // This detects right-clicks anywhere, not just when targeting blocks
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // Load/unload persisted image canvases as the world changes (runs even with no player)
+            ImageCanvasManager.tickLoad(client);
+
             if (client.player == null) return;
-            
+
+            // Image-canvas placement preview takes over input while active
+            if (ImageCanvasManager.isPreviewActive()) {
+                handleImagePlacementKeys(client);
+                return;
+            }
+
             // Tick animated placement if active
             if (PlacementPreview.isAnimatingPlacement()) {
                 PlacementPreview.tickAnimatedPlacement();
@@ -178,6 +214,65 @@ public class FalcraftClient implements ClientModInitializer {
         });
         
         LOGGER.info("Falcraft client initialized");
+    }
+
+    /**
+     * Handles input while an image-canvas placement preview is active:
+     * right-click to place, G to rotate facing, H/N to grow/shrink.
+     */
+    private static void handleImagePlacementKeys(Minecraft client) {
+        long window = client.getWindow().getWindow();
+
+        // Right-click (use key) places the canvas at the current target
+        boolean rightClick = client.options.keyUse.isDown();
+        if (rightClick && !imgWasRightClickPressed) {
+            ImageCanvasManager.confirmPlacement();
+            if (client.player != null) {
+                client.player.displayClientMessage(Component.literal("§a[fal] 🖼 Image placed!"), true);
+            }
+        }
+        imgWasRightClickPressed = rightClick;
+
+        // G: rotate facing
+        boolean rotate = org.lwjgl.glfw.GLFW.glfwGetKey(window, org.lwjgl.glfw.GLFW.GLFW_KEY_G) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+        if (rotate && !imgWasRotatePressed) {
+            ImageCanvasManager.rotateFacing();
+            if (client.player != null) {
+                client.player.displayClientMessage(Component.literal("§e[fal] Rotated facing"), true);
+            }
+        }
+        imgWasRotatePressed = rotate;
+
+        // H: grow
+        boolean grow = org.lwjgl.glfw.GLFW.glfwGetKey(window, org.lwjgl.glfw.GLFW.GLFW_KEY_H) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+        if (grow && !imgWasGrowPressed) {
+            ImageCanvasManager.grow();
+            if (client.player != null) {
+                client.player.displayClientMessage(Component.literal("§e[fal] Size: " + ImageCanvasManager.getWidthBlocks() + " wide"), true);
+            }
+        }
+        imgWasGrowPressed = grow;
+
+        // N: shrink
+        boolean shrink = org.lwjgl.glfw.GLFW.glfwGetKey(window, org.lwjgl.glfw.GLFW.GLFW_KEY_N) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+        if (shrink && !imgWasShrinkPressed) {
+            ImageCanvasManager.shrink();
+            if (client.player != null) {
+                client.player.displayClientMessage(Component.literal("§e[fal] Size: " + ImageCanvasManager.getWidthBlocks() + " wide"), true);
+            }
+        }
+        imgWasShrinkPressed = shrink;
+
+        // F: toggle snap-to-block vs free-hand
+        boolean snap = org.lwjgl.glfw.GLFW.glfwGetKey(window, org.lwjgl.glfw.GLFW.GLFW_KEY_F) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+        if (snap && !imgWasSnapPressed) {
+            ImageCanvasManager.toggleSnap();
+            if (client.player != null) {
+                client.player.displayClientMessage(Component.literal(
+                        "§e[fal] Snap: " + (ImageCanvasManager.isSnapEnabled() ? "ON (block-aligned)" : "OFF (free-hand)")), true);
+            }
+        }
+        imgWasSnapPressed = snap;
     }
 }
 
