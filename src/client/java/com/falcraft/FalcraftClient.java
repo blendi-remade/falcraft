@@ -107,7 +107,16 @@ public class FalcraftClient implements ClientModInitializer {
             if (heldCanvasId != null) {
                 ImageCanvasManager.startPreviewForId(heldCanvasId);
                 if (ImageCanvasManager.isPreviewActive()) {
-                    handleImagePlacementKeys(client);
+                    // Don't apply placement hotkeys while a screen (chat/console/menu) is open
+                    if (client.screen == null) {
+                        handleImagePlacementKeys(client);
+                    } else {
+                        imgWasRightClickPressed = false;
+                        imgWasRotatePressed = false;
+                        imgWasGrowPressed = false;
+                        imgWasShrinkPressed = false;
+                        imgWasSnapPressed = false;
+                    }
                     return;
                 }
             } else if (ImageCanvasManager.isPreviewActive()) {
@@ -126,6 +135,16 @@ public class FalcraftClient implements ClientModInitializer {
             
             // Check if placement mode is active
             if (PlacementPreview.isPlacementActive()) {
+                // Don't apply placement hotkeys while a screen (chat/console/menu) is open
+                if (client.screen != null) {
+                    wasRightClickPressed = false;
+                    wasRotateKeyPressed = false;
+                    wasPitchKeyPressed = false;
+                    wasRollKeyPressed = false;
+                    wasMoveUpKeyPressed = false;
+                    wasMoveDownKeyPressed = false;
+                    return;
+                }
                 // During streaming mode, only allow rotation and ESC to cancel
                 // Don't allow placement until streaming is complete
                 if (PlacementPreview.isStreaming()) {
