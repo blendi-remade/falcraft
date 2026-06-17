@@ -8,8 +8,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.core.Direction;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -21,16 +21,21 @@ import java.io.ByteArrayInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Manages AI-generated image "canvases" displayed in the world as full-fidelity
- * textured quads (Route B). Handles:
- * - a live placement preview that follows the player's crosshair onto walls,
- * - registering the downloaded PNG as a DynamicTexture,
- * - persisting placed canvases to disk and reloading them per world/dimension.
+ * textured quads, driven by an item lifecycle (see {@link MapImageFactory}).
  *
- * All client-side; like falcraft's block placement, persistence is single-player oriented.
+ * Each image is keyed by a falcraft id and stored as a full-res PNG on disk. A tagged
+ * {@code filled_map} item carries that id; holding the item shows a placement preview
+ * (full-res quad), right-click places it, and breaking a placed canvas returns the item.
+ *
+ * Textures are cached by id (registered lazily, released only on world unload) so the
+ * same image can be previewed, placed, and re-placed without re-registering.
+ * Client-side / single-player oriented.
  */
 public class ImageCanvasManager {
     private static final Logger LOGGER = LoggerFactory.getLogger("ImageCanvasManager");
@@ -42,12 +47,10 @@ public class ImageCanvasManager {
     private static final int DEFAULT_WIDTH_BLOCKS = 4;
     private static final int MIN_WIDTH_BLOCKS = 1;
     private static final int MAX_WIDTH_BLOCKS = 32;
-    private static final double WALL_OFFSET = 0.02; // push quad off the wall to avoid z-fighting
+    private static final double WALL_OFFSET = 0.02;
 
-    /** A placement: where a canvas sits and how big it is. */
     public record CanvasTransform(Vec3 center, Direction facing, double width, double height) {}
 
-    /** A placed (or persisted) image canvas. */
     public static final class ImageCanvas {
         public final String id;
         public final String dim;
@@ -73,7 +76,6 @@ public class ImageCanvasManager {
         }
     }
 
-    /** Gson DTO for the on-disk manifest (no ResourceLocation/Vec3). */
     private static final class CanvasRecord {
         String id, dim, facing;
         double x, y, z, width, height;
@@ -81,48 +83,94 @@ public class ImageCanvasManager {
 
     private static final List<ImageCanvas> placed = new ArrayList<>();
 
-    // Preview state
+    // Texture + aspect caches keyed by falcraft id (registered lazily from disk).
+    private static final Map<String, ResourceLocation> textureCache = new HashMap<>();
+    private static final Map<String, Double> aspectCache = new HashMap<>();
+
+    // Preview state (driven by the currently-held tagged map item)
     private static boolean previewActive = false;
-    private static byte[] pendingBytes = null;
     private static String pendingId = null;
     private static ResourceLocation pendingTexture = null;
-    private static double aspect = 1.0; // height / width of the source image
+    private static double aspect = 1.0;
     private static int widthBlocks = DEFAULT_WIDTH_BLOCKS;
-    private static int forcedFacingIndex = -1; // -1 = auto from wall/look
-    private static boolean snapEnabled = true; // snap center to the targeted block's face
+    private static int forcedFacingIndex = -1;
+    private static boolean snapEnabled = true;
 
-    // Persistence load guard
     private static String loadedDim = null;
 
-    // ==================== PREVIEW ====================
+    // ==================== IMAGE STORAGE ====================
 
-    /**
-     * Starts the placement preview for a freshly generated image.
-     * @param pngBytes the downloaded PNG
-     */
-    public static void startPreview(byte[] pngBytes) {
+    public static String newId() {
+        return String.valueOf(System.currentTimeMillis());
+    }
+
+    public static void saveImageBytes(String id, byte[] png) {
         try {
-            NativeImage img = NativeImage.read(new ByteArrayInputStream(pngBytes));
-            int w = img.getWidth();
-            int h = img.getHeight();
+            Path dir = canvasDir();
+            Files.createDirectories(dir);
+            Files.write(dir.resolve(id + ".png"), png);
+        } catch (Exception e) {
+            LOGGER.error("Failed to save image bytes for {}", id, e);
+        }
+    }
 
-            String id = String.valueOf(System.currentTimeMillis());
+    public static byte[] readImageBytes(String id) {
+        try {
+            Path png = canvasDir().resolve(id + ".png");
+            return Files.exists(png) ? Files.readAllBytes(png) : null;
+        } catch (Exception e) {
+            LOGGER.error("Failed to read image bytes for {}", id, e);
+            return null;
+        }
+    }
+
+    // ==================== TEXTURE CACHE ====================
+
+    /** Public accessor: returns the registered texture for an id (loads from disk if needed), or null. */
+    public static ResourceLocation getOrLoadTexture(String id) {
+        return getTexture(id);
+    }
+
+    /** Returns the registered texture for an id, loading + registering it from disk if needed. */
+    private static ResourceLocation getTexture(String id) {
+        ResourceLocation cached = textureCache.get(id);
+        if (cached != null) return cached;
+
+        byte[] bytes = readImageBytes(id);
+        if (bytes == null) return null;
+        try {
+            NativeImage img = NativeImage.read(new ByteArrayInputStream(bytes));
+            aspectCache.put(id, img.getWidth() > 0 ? (double) img.getHeight() / img.getWidth() : 1.0);
             ResourceLocation loc = ResourceLocation.fromNamespaceAndPath("falcraft", "canvas/" + id);
             Minecraft.getInstance().getTextureManager().register(loc, new DynamicTexture(img));
-
-            pendingBytes = pngBytes;
-            pendingId = id;
-            pendingTexture = loc;
-            aspect = h > 0 ? (double) h / w : 1.0;
-            widthBlocks = DEFAULT_WIDTH_BLOCKS;
-            forcedFacingIndex = -1;
-            previewActive = true;
-
-            LOGGER.info("Image preview started ({}x{}, aspect {}) texture {}", w, h, aspect, loc);
+            textureCache.put(id, loc);
+            return loc;
         } catch (Exception e) {
-            LOGGER.error("Failed to start image preview", e);
-            previewActive = false;
+            LOGGER.error("Failed to register texture for {}", id, e);
+            return null;
         }
+    }
+
+    // ==================== ITEM-DRIVEN PREVIEW ====================
+
+    /**
+     * Ensures a placement preview is active for the given id (called while the player
+     * holds the matching tagged map). No-op if already previewing that id.
+     */
+    public static void startPreviewForId(String id) {
+        if (previewActive && id.equals(pendingId)) return;
+
+        ResourceLocation tex = getTexture(id);
+        if (tex == null) {
+            LOGGER.warn("No image on disk for held canvas id {}", id);
+            return;
+        }
+        pendingId = id;
+        pendingTexture = tex;
+        aspect = aspectCache.getOrDefault(id, 1.0);
+        widthBlocks = DEFAULT_WIDTH_BLOCKS;
+        forcedFacingIndex = -1;
+        previewActive = true;
     }
 
     public static boolean isPreviewActive() {
@@ -133,7 +181,12 @@ public class ImageCanvasManager {
         return pendingTexture;
     }
 
-    /** Computes where the canvas would land right now, from the player's crosshair. */
+    public static void cancelPreview() {
+        previewActive = false;
+        pendingId = null;
+        pendingTexture = null;
+    }
+
     public static CanvasTransform computeTargetTransform(LocalPlayer player) {
         double width = widthBlocks;
         double height = width * aspect;
@@ -141,13 +194,11 @@ public class ImageCanvasManager {
         Vec3 eye = player.getEyePosition(1.0f);
         Vec3 look = player.getLookAngle();
         Vec3 end = eye.add(look.scale(200.0));
-
         ClipContext ctx = new ClipContext(eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player);
         BlockHitResult hit = player.level().clip(ctx);
 
         Direction facing;
         Vec3 center;
-
         if (hit.getType() == HitResult.Type.BLOCK) {
             Direction face = hit.getDirection();
             facing = (forcedFacingIndex >= 0)
@@ -155,39 +206,30 @@ public class ImageCanvasManager {
                     : (face.getAxis().isHorizontal() ? face : nearestHorizontalTowardPlayer(look));
             center = hit.getLocation();
         } else {
-            facing = (forcedFacingIndex >= 0)
-                    ? HORIZONTALS[forcedFacingIndex]
-                    : nearestHorizontalTowardPlayer(look);
+            facing = (forcedFacingIndex >= 0) ? HORIZONTALS[forcedFacingIndex] : nearestHorizontalTowardPlayer(look);
             center = eye.add(look.scale(Math.max(width, 4.0)));
         }
 
         Vec3 normal = Vec3.atLowerCornerOf(facing.getNormal());
 
-        // Snap so the image's edges align to block boundaries (item-frame style).
-        // Quantizes the two in-plane axes (vertical + the horizontal perpendicular to the
-        // facing normal); the depth axis is left on the wall surface.
         if (snapEnabled) {
             double x = center.x, y = snapCenter(center.y, height), z = center.z;
             if (Math.abs(normal.x) > 0.5) {
-                z = snapCenter(center.z, width); // facing E/W -> in-plane horizontal is Z
+                z = snapCenter(center.z, width);
             } else {
-                x = snapCenter(center.x, width); // facing N/S -> in-plane horizontal is X
+                x = snapCenter(center.x, width);
             }
             center = new Vec3(x, y, z);
         }
 
-        // Push the quad slightly off the surface, along the facing normal (toward the viewer).
         center = center.add(normal.scale(WALL_OFFSET));
-
         return new CanvasTransform(center, facing, width, height);
     }
 
-    /** Snaps a center coordinate so the rectangle's lower edge (center - length/2) lands on an integer. */
     private static double snapCenter(double c, double length) {
         return Math.round(c - length / 2.0) + length / 2.0;
     }
 
-    /** The image faces the player: normal points back toward the eye (opposite the look dir). */
     private static Direction nearestHorizontalTowardPlayer(Vec3 look) {
         double dx = -look.x;
         double dz = -look.z;
@@ -221,12 +263,15 @@ public class ImageCanvasManager {
         return snapEnabled;
     }
 
-    /** Confirms placement at the current target, persists it, and exits preview. */
-    public static void confirmPlacement() {
-        if (!previewActive) return;
+    /**
+     * Places the previewed canvas at the current target.
+     * @return true if a canvas was placed (caller should consume one held item)
+     */
+    public static boolean confirmPlacement() {
+        if (!previewActive) return false;
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
-        if (player == null || mc.level == null) return;
+        if (player == null || mc.level == null) return false;
 
         CanvasTransform t = computeTargetTransform(player);
         String dim = mc.level.dimension().location().toString();
@@ -234,29 +279,15 @@ public class ImageCanvasManager {
         ImageCanvas canvas = new ImageCanvas(pendingId, dim, t.center(), t.facing(),
                 t.width(), t.height(), pendingTexture);
         placed.add(canvas);
-        saveCanvas(canvas, pendingBytes);
+        saveCanvasRecord(canvas);
 
-        LOGGER.info("Placed image canvas {} at {} facing {} ({}x{} blocks)",
+        LOGGER.info("Placed image canvas {} at {} facing {} ({}x{})",
                 pendingId, t.center(), t.facing(), t.width(), t.height());
 
-        // Exit preview but keep the texture (now owned by the placed canvas).
         previewActive = false;
-        pendingBytes = null;
         pendingId = null;
         pendingTexture = null;
-    }
-
-    /** Cancels the preview and releases the pending texture. */
-    public static void cancelPreview() {
-        if (!previewActive) return;
-        if (pendingTexture != null) {
-            Minecraft.getInstance().getTextureManager().release(pendingTexture);
-        }
-        previewActive = false;
-        pendingBytes = null;
-        pendingId = null;
-        pendingTexture = null;
-        LOGGER.info("Cancelled image preview");
+        return true;
     }
 
     public static List<ImageCanvas> getPlacedCanvases() {
@@ -267,19 +298,19 @@ public class ImageCanvasManager {
 
     /**
      * Ray-casts the player's look against placed canvases and removes the nearest one hit.
-     * @return true if a canvas was removed (caller can cancel the block-break)
+     * The PNG and texture are kept (the item can be re-placed).
+     * @return the removed canvas's id, or null if nothing was hit
      */
-    public static boolean removeLookedAt(Player player) {
+    public static String removeLookedAt(Player player) {
         Vec3 eye = player.getEyePosition(1.0f);
         Vec3 dir = player.getLookAngle();
         ImageCanvas hit = pickCanvas(eye, dir, 16.0);
-        if (hit == null) return false;
+        if (hit == null) return null;
         removeCanvas(hit);
         LOGGER.info("Removed image canvas {}", hit.id);
-        return true;
+        return hit.id;
     }
 
-    /** Returns the nearest canvas whose rectangle the ray (eye + t*dir) intersects, or null. */
     private static ImageCanvas pickCanvas(Vec3 eye, Vec3 dir, double maxDist) {
         ImageCanvas best = null;
         double bestT = maxDist;
@@ -294,7 +325,7 @@ public class ImageCanvasManager {
             Vec3 right = new Vec3(0, 1, 0).cross(n).normalize();
             Vec3 d = p.subtract(c.center);
             double a = d.dot(right);
-            double b = d.y; // up component
+            double b = d.y;
             if (Math.abs(a) <= c.width / 2.0 && Math.abs(b) <= c.height / 2.0) {
                 best = c;
                 bestT = t;
@@ -304,22 +335,20 @@ public class ImageCanvasManager {
     }
 
     private static void removeCanvas(ImageCanvas c) {
-        Minecraft.getInstance().getTextureManager().release(c.texture);
         placed.remove(c);
         try {
-            Files.deleteIfExists(canvasDir().resolve(c.id + ".png"));
             List<CanvasRecord> records = readManifest();
             records.removeIf(r -> c.id.equals(r.id));
             Files.writeString(manifestPath(), GSON.toJson(records));
         } catch (Exception e) {
-            LOGGER.error("Failed to delete persisted canvas {}", c.id, e);
+            LOGGER.error("Failed to update manifest after removing {}", c.id, e);
         }
+        // Keep PNG + cached texture: the returned item can be re-placed.
     }
 
-    /** Removes every canvas in the current dimension. Returns how many were removed. */
+    /** Removes every placed canvas in the current dimension. Returns how many were removed. */
     public static int clearCurrentDimension() {
         int count = placed.size();
-        // Copy to avoid concurrent modification while removeCanvas mutates `placed`.
         for (ImageCanvas c : new ArrayList<>(placed)) {
             removeCanvas(c);
         }
@@ -337,13 +366,11 @@ public class ImageCanvasManager {
         return canvasDir().resolve("canvases.json");
     }
 
-    private static void saveCanvas(ImageCanvas c, byte[] pngBytes) {
+    private static void saveCanvasRecord(ImageCanvas c) {
         try {
-            Path dir = canvasDir();
-            Files.createDirectories(dir);
-            Files.write(dir.resolve(c.id + ".png"), pngBytes);
-
+            Files.createDirectories(canvasDir());
             List<CanvasRecord> records = readManifest();
+            records.removeIf(r -> c.id.equals(r.id)); // avoid duplicates on re-place
             CanvasRecord r = new CanvasRecord();
             r.id = c.id;
             r.dim = c.dim;
@@ -354,10 +381,9 @@ public class ImageCanvasManager {
             r.width = c.width;
             r.height = c.height;
             records.add(r);
-
             Files.writeString(manifestPath(), GSON.toJson(records));
         } catch (Exception e) {
-            LOGGER.error("Failed to persist image canvas {}", c.id, e);
+            LOGGER.error("Failed to persist canvas record {}", c.id, e);
         }
     }
 
@@ -365,8 +391,8 @@ public class ImageCanvasManager {
         try {
             Path mf = manifestPath();
             if (!Files.exists(mf)) return new ArrayList<>();
-            String json = Files.readString(mf);
-            List<CanvasRecord> list = GSON.fromJson(json, new TypeToken<List<CanvasRecord>>() {}.getType());
+            List<CanvasRecord> list = GSON.fromJson(Files.readString(mf),
+                    new TypeToken<List<CanvasRecord>>() {}.getType());
             return list != null ? list : new ArrayList<>();
         } catch (Exception e) {
             LOGGER.error("Failed to read canvas manifest", e);
@@ -374,14 +400,13 @@ public class ImageCanvasManager {
         }
     }
 
-    /**
-     * Loads/unloads persisted canvases as the player changes worlds.
-     * Called every client tick (cheap guard).
-     */
+    /** Loads/unloads canvases + textures as the player changes worlds. Called every client tick. */
     public static void tickLoad(Minecraft mc) {
         if (mc.level == null) {
             if (loadedDim != null) {
-                releaseAll();
+                releaseAllTextures();
+                placed.clear();
+                cancelPreview();
                 loadedDim = null;
             }
             return;
@@ -389,41 +414,30 @@ public class ImageCanvasManager {
         String dim = mc.level.dimension().location().toString();
         if (dim.equals(loadedDim)) return;
 
-        releaseAll();
+        placed.clear();
         loadForDimension(dim);
         loadedDim = dim;
     }
 
-    private static void releaseAll() {
+    private static void releaseAllTextures() {
         var tm = Minecraft.getInstance().getTextureManager();
-        for (ImageCanvas c : placed) {
-            tm.release(c.texture);
+        for (ResourceLocation loc : textureCache.values()) {
+            tm.release(loc);
         }
-        placed.clear();
+        textureCache.clear();
+        aspectCache.clear();
     }
 
     private static void loadForDimension(String dim) {
-        List<CanvasRecord> records = readManifest();
         int loaded = 0;
-        for (CanvasRecord r : records) {
+        for (CanvasRecord r : readManifest()) {
             if (!dim.equals(r.dim)) continue;
-            try {
-                Path png = canvasDir().resolve(r.id + ".png");
-                if (!Files.exists(png)) continue;
-
-                NativeImage img = NativeImage.read(new ByteArrayInputStream(Files.readAllBytes(png)));
-                ResourceLocation loc = ResourceLocation.fromNamespaceAndPath("falcraft", "canvas/" + r.id);
-                Minecraft.getInstance().getTextureManager().register(loc, new DynamicTexture(img));
-
-                Direction facing = Direction.byName(r.facing);
-                if (facing == null) facing = Direction.NORTH;
-
-                placed.add(new ImageCanvas(r.id, r.dim, new Vec3(r.x, r.y, r.z), facing,
-                        r.width, r.height, loc));
-                loaded++;
-            } catch (Exception e) {
-                LOGGER.error("Failed to load persisted canvas {}", r.id, e);
-            }
+            ResourceLocation tex = getTexture(r.id);
+            if (tex == null) continue;
+            Direction facing = Direction.byName(r.facing);
+            if (facing == null) facing = Direction.NORTH;
+            placed.add(new ImageCanvas(r.id, r.dim, new Vec3(r.x, r.y, r.z), facing, r.width, r.height, tex));
+            loaded++;
         }
         if (loaded > 0) {
             LOGGER.info("Loaded {} image canvas(es) for dimension {}", loaded, dim);

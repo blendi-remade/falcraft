@@ -8,19 +8,27 @@ import com.falcraft.commands.SplatCommand;
 import com.falcraft.commands.ImageCommand;
 import com.falcraft.commands.StreamCommand;
 import com.falcraft.render.GhostBlockRenderer;
+import com.falcraft.render.HotbarCanvasOverlay;
 import com.falcraft.render.ImageCanvasRenderer;
 import com.falcraft.util.ImageCanvasManager;
+import com.falcraft.util.MapImageFactory;
 import com.falcraft.util.PlacementPreview;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.UUID;
 
 public class FalcraftClient implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("FalcraftClient");
@@ -66,11 +74,17 @@ public class FalcraftClient implements ClientModInitializer {
             );
         });
 
+        // Draw the AI image as a thumbnail over hotbar slots holding canvas items
+        HudRenderCallback.EVENT.register((guiGraphics, tickDelta) -> HotbarCanvasOverlay.render(guiGraphics));
+
         // Left-click an image canvas to remove it (cancels the block-break behind it)
         AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
-            if (world.isClientSide && !ImageCanvasManager.isPreviewActive()
-                    && ImageCanvasManager.removeLookedAt(player)) {
-                return InteractionResult.FAIL; // consume the click, don't break the wall
+            if (world.isClientSide && !ImageCanvasManager.isPreviewActive()) {
+                String removedId = ImageCanvasManager.removeLookedAt(player);
+                if (removedId != null) {
+                    giveBackCanvasItem(removedId); // hand the map back so it can be re-placed
+                    return InteractionResult.FAIL; // consume the click, don't break the wall
+                }
             }
             return InteractionResult.PASS;
         });
@@ -83,10 +97,17 @@ public class FalcraftClient implements ClientModInitializer {
 
             if (client.player == null) return;
 
-            // Image-canvas placement preview takes over input while active
-            if (ImageCanvasManager.isPreviewActive()) {
-                handleImagePlacementKeys(client);
-                return;
+            // Holding a tagged map item drives the image placement preview
+            ItemStack held = client.player.getMainHandItem();
+            String heldCanvasId = MapImageFactory.getFalcraftId(held);
+            if (heldCanvasId != null) {
+                ImageCanvasManager.startPreviewForId(heldCanvasId);
+                if (ImageCanvasManager.isPreviewActive()) {
+                    handleImagePlacementKeys(client);
+                    return;
+                }
+            } else if (ImageCanvasManager.isPreviewActive()) {
+                ImageCanvasManager.cancelPreview();
             }
 
             // Tick animated placement if active
@@ -226,9 +247,11 @@ public class FalcraftClient implements ClientModInitializer {
         // Right-click (use key) places the canvas at the current target
         boolean rightClick = client.options.keyUse.isDown();
         if (rightClick && !imgWasRightClickPressed) {
-            ImageCanvasManager.confirmPlacement();
-            if (client.player != null) {
-                client.player.displayClientMessage(Component.literal("§a[fal] 🖼 Image placed!"), true);
+            if (ImageCanvasManager.confirmPlacement()) {
+                consumeHeldCanvasItem(client); // one map -> one placed canvas
+                if (client.player != null) {
+                    client.player.displayClientMessage(Component.literal("§a[fal] 🖼 Image placed!"), true);
+                }
             }
         }
         imgWasRightClickPressed = rightClick;
@@ -273,6 +296,43 @@ public class FalcraftClient implements ClientModInitializer {
             }
         }
         imgWasSnapPressed = snap;
+    }
+
+    /** Removes one tagged canvas map from the player's selected slot (server-side). */
+    private static void consumeHeldCanvasItem(Minecraft mc) {
+        MinecraftServer server = mc.getSingleplayerServer();
+        if (server == null || mc.player == null) return;
+        UUID uuid = mc.player.getUUID();
+        server.execute(() -> {
+            ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+            if (sp == null) return;
+            ItemStack selected = sp.getInventory().getSelected();
+            if (MapImageFactory.getFalcraftId(selected) != null) {
+                selected.shrink(1);
+            }
+        });
+    }
+
+    /** Re-mints the tagged map for a removed canvas and gives it back to the player (server-side). */
+    private static void giveBackCanvasItem(String id) {
+        Minecraft mc = Minecraft.getInstance();
+        MinecraftServer server = mc.getSingleplayerServer();
+        if (server == null || mc.player == null) return;
+        byte[] png = ImageCanvasManager.readImageBytes(id);
+        if (png == null) return;
+        UUID uuid = mc.player.getUUID();
+        server.execute(() -> {
+            try {
+                ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+                if (sp == null) return;
+                ItemStack map = MapImageFactory.createTaggedMap(sp.serverLevel(), png, id);
+                if (!sp.getInventory().add(map)) {
+                    sp.drop(map, false);
+                }
+            } catch (Exception e) {
+                LOGGER.error("Failed to give back canvas item {}", id, e);
+            }
+        });
     }
 }
 
