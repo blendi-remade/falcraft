@@ -88,6 +88,8 @@ public class ImageCanvasManager {
     private static final Map<String, Double> aspectCache = new HashMap<>();
     private static final Map<String, VideoPlayback> videos = new HashMap<>();
     private static final java.util.Set<String> decoding = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // Placed video canvases awaiting async decode at world load (id -> records to add once ready).
+    private static final Map<String, List<CanvasRecord>> pendingVideoCanvases = new HashMap<>();
 
     /** Playback state for an animated (video) canvas: frames cycled into one DynamicTexture. */
     private static final class VideoPlayback {
@@ -165,16 +167,33 @@ public class ImageCanvasManager {
      * The texture is one DynamicTexture whose pixels are swapped each displayed frame.
      */
     public static void registerVideo(String id, List<NativeImage> frames, double fps) {
-        if (frames.isEmpty() || textureCache.containsKey(id)) return;
-        NativeImage first = frames.get(0);
-        aspectCache.put(id, first.getWidth() > 0 ? (double) first.getHeight() / first.getWidth() : 1.0);
+        if (!textureCache.containsKey(id) && !frames.isEmpty()) {
+            NativeImage first = frames.get(0);
+            aspectCache.put(id, first.getWidth() > 0 ? (double) first.getHeight() / first.getWidth() : 1.0);
 
-        DynamicTexture tex = new DynamicTexture(cloneImage(first));
-        ResourceLocation loc = ResourceLocation.fromNamespaceAndPath("falcraft", "canvas/" + id);
-        Minecraft.getInstance().getTextureManager().register(loc, tex);
-        textureCache.put(id, loc);
-        videos.put(id, new VideoPlayback(tex, frames, fps));
-        LOGGER.info("Registered video {} ({} frames, {} fps)", id, frames.size(), String.format("%.1f", fps));
+            DynamicTexture tex = new DynamicTexture(cloneImage(first));
+            ResourceLocation loc = ResourceLocation.fromNamespaceAndPath("falcraft", "canvas/" + id);
+            Minecraft.getInstance().getTextureManager().register(loc, tex);
+            textureCache.put(id, loc);
+            videos.put(id, new VideoPlayback(tex, frames, fps));
+            LOGGER.info("Registered video {} ({} frames, {} fps)", id, frames.size(), String.format("%.1f", fps));
+        } else if (!frames.isEmpty()) {
+            // Already registered (race) - release the redundant frames so they don't leak.
+            for (NativeImage f : frames) f.close();
+        }
+        // A persisted placement may have been waiting for this video to finish decoding.
+        promotePendingVideoCanvases(id);
+    }
+
+    private static void promotePendingVideoCanvases(String id) {
+        List<CanvasRecord> pending = pendingVideoCanvases.remove(id);
+        if (pending == null || pending.isEmpty()) return;
+        ResourceLocation tex = textureCache.get(id);
+        if (tex == null) return; // decode failed; drop them
+        for (CanvasRecord r : pending) {
+            placed.add(makeCanvas(r, tex));
+        }
+        LOGGER.info("Restored {} placed video canvas(es) for {}", pending.size(), id);
     }
 
     /** Decodes a persisted mp4 off-thread and registers it once ready. */
@@ -519,6 +538,7 @@ public class ImageCanvasManager {
         if (dim.equals(loadedDim)) return;
 
         placed.clear();
+        pendingVideoCanvases.clear();
         loadForDimension(dim);
         loadedDim = dim;
     }
@@ -537,21 +557,40 @@ public class ImageCanvasManager {
         videos.clear();
         textureCache.clear();
         aspectCache.clear();
+        pendingVideoCanvases.clear();
     }
 
     private static void loadForDimension(String dim) {
         int loaded = 0;
         for (CanvasRecord r : readManifest()) {
             if (!dim.equals(r.dim)) continue;
+
+            if (Files.exists(videoFile(r.id))) {
+                // Video: add immediately if already decoded this session, else queue for async decode.
+                ResourceLocation tex = textureCache.get(r.id);
+                if (tex != null) {
+                    placed.add(makeCanvas(r, tex));
+                    loaded++;
+                } else {
+                    pendingVideoCanvases.computeIfAbsent(r.id, k -> new ArrayList<>()).add(r);
+                    decodeVideoAsync(r.id); // promotes the pending placement when done
+                }
+                continue;
+            }
+
             ResourceLocation tex = getTexture(r.id);
             if (tex == null) continue;
-            Direction facing = Direction.byName(r.facing);
-            if (facing == null) facing = Direction.NORTH;
-            placed.add(new ImageCanvas(r.id, r.dim, new Vec3(r.x, r.y, r.z), facing, r.width, r.height, tex));
+            placed.add(makeCanvas(r, tex));
             loaded++;
         }
         if (loaded > 0) {
-            LOGGER.info("Loaded {} image canvas(es) for dimension {}", loaded, dim);
+            LOGGER.info("Loaded {} canvas(es) for dimension {}", loaded, dim);
         }
+    }
+
+    private static ImageCanvas makeCanvas(CanvasRecord r, ResourceLocation tex) {
+        Direction facing = Direction.byName(r.facing);
+        if (facing == null) facing = Direction.NORTH;
+        return new ImageCanvas(r.id, r.dim, new Vec3(r.x, r.y, r.z), facing, r.width, r.height, tex);
     }
 }
