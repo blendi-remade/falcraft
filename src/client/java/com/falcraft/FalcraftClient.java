@@ -1,6 +1,7 @@
 package com.falcraft;
 
 import com.falcraft.commands.ConfigCommand;
+import com.falcraft.commands.HelpCommand;
 import com.falcraft.commands.GenerateCommand;
 import com.falcraft.commands.RemixCommand;
 import com.falcraft.commands.CraftCommand;
@@ -11,11 +12,13 @@ import com.falcraft.commands.StreamCommand;
 import com.falcraft.render.GhostBlockRenderer;
 import com.falcraft.render.HotbarCanvasOverlay;
 import com.falcraft.render.ImageCanvasRenderer;
+import com.falcraft.util.GuideBook;
 import com.falcraft.util.ImageCanvasManager;
 import com.falcraft.util.MapImageFactory;
 import com.falcraft.util.PlacementPreview;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
@@ -52,6 +55,7 @@ public class FalcraftClient implements ClientModInitializer {
     public void onInitializeClient() {
         // Register the client-side commands
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            HelpCommand.register(dispatcher);    // /fal, /fal help, /fal guide
             ConfigCommand.register(dispatcher);
             // RemixCommand.register(dispatcher);  // Coming in v1.1.0
             GenerateCommand.register(dispatcher);
@@ -90,7 +94,20 @@ public class FalcraftClient implements ClientModInitializer {
             }
             return InteractionResult.PASS;
         });
-        
+
+        // First time a player joins a single-player world, hand them the falcraft guide book
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            MinecraftServer server = client.getSingleplayerServer();
+            if (server == null || GuideBook.wasGiven()) return; // SP only, once
+            server.execute(() -> {
+                var players = server.getPlayerList().getPlayers();
+                if (players.isEmpty()) return;
+                GuideBook.giveTo(players.get(0));
+                GuideBook.markGiven();
+                LOGGER.info("Gave falcraft guide book to player on first join");
+            });
+        });
+
         // Register client tick handler for placement confirmation and animated placement
         // This detects right-clicks anywhere, not just when targeting blocks
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
