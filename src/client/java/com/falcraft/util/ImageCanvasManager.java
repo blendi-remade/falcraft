@@ -86,6 +86,22 @@ public class ImageCanvasManager {
     // Texture + aspect caches keyed by falcraft id (registered lazily from disk).
     private static final Map<String, ResourceLocation> textureCache = new HashMap<>();
     private static final Map<String, Double> aspectCache = new HashMap<>();
+    private static final Map<String, VideoPlayback> videos = new HashMap<>();
+    private static final java.util.Set<String> decoding = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Playback state for an animated (video) canvas: frames cycled into one DynamicTexture. */
+    private static final class VideoPlayback {
+        final DynamicTexture tex;
+        final List<NativeImage> frames;
+        final double fps;
+        long startNanos = 0;
+        int lastIdx = -1;
+        VideoPlayback(DynamicTexture tex, List<NativeImage> frames, double fps) {
+            this.tex = tex;
+            this.frames = frames;
+            this.fps = fps;
+        }
+    }
 
     // Preview state (driven by the currently-held tagged map item)
     private static boolean previewActive = false;
@@ -124,6 +140,88 @@ public class ImageCanvasManager {
         }
     }
 
+    private static Path videoFile(String id) {
+        return canvasDir().resolve(id + ".mp4");
+    }
+
+    public static void saveVideoBytes(String id, byte[] mp4) {
+        try {
+            Files.createDirectories(canvasDir());
+            Files.write(videoFile(id), mp4);
+        } catch (Exception e) {
+            LOGGER.error("Failed to save video bytes for {}", id, e);
+        }
+    }
+
+    /** Decodes a previously-saved mp4 (off-thread). */
+    public static VideoDecoder.DecodedVideo decodeSavedVideo(String id) {
+        return VideoDecoder.decode(videoFile(id).toFile());
+    }
+
+    // ==================== VIDEO PLAYBACK ====================
+
+    /**
+     * Registers decoded video frames as an animated texture (render thread).
+     * The texture is one DynamicTexture whose pixels are swapped each displayed frame.
+     */
+    public static void registerVideo(String id, List<NativeImage> frames, double fps) {
+        if (frames.isEmpty() || textureCache.containsKey(id)) return;
+        NativeImage first = frames.get(0);
+        aspectCache.put(id, first.getWidth() > 0 ? (double) first.getHeight() / first.getWidth() : 1.0);
+
+        DynamicTexture tex = new DynamicTexture(cloneImage(first));
+        ResourceLocation loc = ResourceLocation.fromNamespaceAndPath("falcraft", "canvas/" + id);
+        Minecraft.getInstance().getTextureManager().register(loc, tex);
+        textureCache.put(id, loc);
+        videos.put(id, new VideoPlayback(tex, frames, fps));
+        LOGGER.info("Registered video {} ({} frames, {} fps)", id, frames.size(), String.format("%.1f", fps));
+    }
+
+    /** Decodes a persisted mp4 off-thread and registers it once ready. */
+    private static void decodeVideoAsync(String id) {
+        if (textureCache.containsKey(id) || !decoding.add(id)) return;
+        new Thread(() -> {
+            try {
+                VideoDecoder.DecodedVideo dv = VideoDecoder.decode(videoFile(id).toFile());
+                if (dv.frames().isEmpty()) {
+                    decoding.remove(id);
+                    return;
+                }
+                Minecraft.getInstance().execute(() -> {
+                    registerVideo(id, dv.frames(), dv.fps());
+                    decoding.remove(id);
+                });
+            } catch (Exception e) {
+                LOGGER.error("Async video decode failed for {}", id, e);
+                decoding.remove(id);
+            }
+        }, "fal-VideoDecode-" + id).start();
+    }
+
+    /** Advances all playing videos, uploading the current frame. Called each client tick. */
+    public static void tickVideos() {
+        if (videos.isEmpty()) return;
+        long now = System.nanoTime();
+        for (VideoPlayback vp : videos.values()) {
+            int n = vp.frames.size();
+            if (n <= 1) continue;
+            if (vp.startNanos == 0) vp.startNanos = now;
+            double elapsed = (now - vp.startNanos) / 1_000_000_000.0;
+            int idx = (int) (elapsed * vp.fps) % n;
+            if (idx != vp.lastIdx && vp.tex.getPixels() != null) {
+                vp.tex.getPixels().copyFrom(vp.frames.get(idx));
+                vp.tex.upload();
+                vp.lastIdx = idx;
+            }
+        }
+    }
+
+    private static NativeImage cloneImage(NativeImage src) {
+        NativeImage copy = new NativeImage(src.getWidth(), src.getHeight(), false);
+        copy.copyFrom(src);
+        return copy;
+    }
+
     // ==================== TEXTURE CACHE ====================
 
     /** Public accessor: returns the registered texture for an id (loads from disk if needed), or null. */
@@ -135,6 +233,12 @@ public class ImageCanvasManager {
     private static ResourceLocation getTexture(String id) {
         ResourceLocation cached = textureCache.get(id);
         if (cached != null) return cached;
+
+        // Video id: decode the mp4 off-thread and register lazily (returns null until ready).
+        if (Files.exists(videoFile(id))) {
+            decodeVideoAsync(id);
+            return null;
+        }
 
         byte[] bytes = readImageBytes(id);
         if (bytes == null) return null;
@@ -424,6 +528,13 @@ public class ImageCanvasManager {
         for (ResourceLocation loc : textureCache.values()) {
             tm.release(loc);
         }
+        // Releasing the DynamicTexture closes its internal image; close the held frame buffers too.
+        for (VideoPlayback vp : videos.values()) {
+            for (NativeImage frame : vp.frames) {
+                frame.close();
+            }
+        }
+        videos.clear();
         textureCache.clear();
         aspectCache.clear();
     }
