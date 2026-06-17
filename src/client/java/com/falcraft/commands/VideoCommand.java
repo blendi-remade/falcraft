@@ -4,6 +4,7 @@ import com.falcraft.util.FalAPI;
 import com.falcraft.util.ImageCanvasManager;
 import com.falcraft.util.MapImageFactory;
 import com.falcraft.util.VideoDecoder;
+import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
@@ -16,6 +17,7 @@ import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
 import java.util.Base64;
 import java.util.UUID;
 
@@ -33,6 +35,35 @@ import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.lit
  */
 public class VideoCommand {
     private static final Logger LOGGER = LoggerFactory.getLogger("VideoCommand");
+
+    /** Source-image orientation -> the aspect_ratio each video model should use. */
+    private enum Orient {
+        SQUARE("auto", "1:1"),      // LTX has no square -> auto (best effort); Seedance -> 1:1
+        LANDSCAPE("16:9", "16:9"),
+        PORTRAIT("9:16", "9:16");
+
+        final String ltx;
+        final String seedance;
+
+        Orient(String ltx, String seedance) {
+            this.ltx = ltx;
+            this.seedance = seedance;
+        }
+    }
+
+    /** Determines orientation from a PNG's dimensions (near-square counts as square). */
+    private static Orient orientationOf(byte[] png) {
+        try (NativeImage ni = NativeImage.read(new ByteArrayInputStream(png))) {
+            int w = ni.getWidth();
+            int h = ni.getHeight();
+            if (w > h * 1.1) return Orient.LANDSCAPE;
+            if (h > w * 1.1) return Orient.PORTRAIT;
+            return Orient.SQUARE;
+        } catch (Exception e) {
+            LOGGER.warn("Could not read image dimensions, defaulting to square", e);
+            return Orient.SQUARE;
+        }
+    }
 
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
         dispatcher.register(literal("fal")
@@ -79,10 +110,15 @@ public class VideoCommand {
             try {
                 String dataUri = "data:image/png;base64," + Base64.getEncoder().encodeToString(sourcePng);
 
+                // Match the video's aspect ratio to the source image's orientation.
+                // LTX (fast) has no square option -> "auto"; Seedance supports "1:1".
+                Orient orient = orientationOf(sourcePng);
+                String aspect = fast ? orient.ltx : orient.seedance;
+
                 FalAPI falApi = new FalAPI();
                 String videoUrl = fast
-                        ? falApi.generateVideoFast(dataUri, prompt)
-                        : falApi.generateVideoNormal(dataUri, prompt);
+                        ? falApi.generateVideoFast(dataUri, prompt, aspect)
+                        : falApi.generateVideoNormal(dataUri, prompt, aspect);
 
                 byte[] mp4 = falApi.downloadFile(videoUrl);
                 LOGGER.info("Downloaded video ({} bytes)", mp4.length);

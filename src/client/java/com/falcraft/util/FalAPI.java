@@ -1075,11 +1075,11 @@ public class FalAPI {
      * @param prompt The text prompt (used as-is)
      * @return The URL of the generated image
      */
-    public String generatePictureNanoBanana(String prompt) throws IOException, InterruptedException {
+    public String generatePictureNanoBanana(String prompt, String aspectRatio) throws IOException, InterruptedException {
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("prompt", prompt);
         requestBody.addProperty("num_images", 1);
-        requestBody.addProperty("aspect_ratio", "1:1");
+        requestBody.addProperty("aspect_ratio", aspectRatio); // "1:1", "16:9", "9:16"
         requestBody.addProperty("output_format", "png");
         requestBody.addProperty("resolution", "1K");
         return pollImageResult(FAL_NANOBANANA_QUEUE_SUBMIT, requestBody, 60, 2000, "Nano Banana Pro");
@@ -1090,10 +1090,10 @@ public class FalAPI {
      * @param prompt The text prompt (used as-is)
      * @return The URL of the generated image
      */
-    public String generatePictureZImage(String prompt) throws IOException, InterruptedException {
+    public String generatePictureZImage(String prompt, String imageSize) throws IOException, InterruptedException {
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("prompt", prompt);
-        requestBody.addProperty("image_size", "square_hd");
+        requestBody.addProperty("image_size", imageSize); // "square_hd", "landscape_16_9", "portrait_16_9"
         requestBody.addProperty("num_inference_steps", 8);
         requestBody.addProperty("num_images", 1);
         requestBody.addProperty("enable_safety_checker", true);
@@ -1177,14 +1177,14 @@ public class FalAPI {
      * @param imageUrl source image (public URL or base64 data URI)
      * @param prompt   motion/scene description
      */
-    public String generateVideoFast(String imageUrl, String prompt) throws IOException, InterruptedException {
+    public String generateVideoFast(String imageUrl, String prompt, String aspectRatio) throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
         body.addProperty("image_url", imageUrl);
         body.addProperty("prompt", prompt);
         body.addProperty("duration", 6);          // fast model minimum
         body.addProperty("resolution", "1080p");   // fast model minimum
         body.addProperty("fps", 24);
-        body.addProperty("aspect_ratio", "auto");
+        body.addProperty("aspect_ratio", aspectRatio); // "16:9", "9:16", or "auto" (LTX has no square)
         body.addProperty("generate_audio", false);  // we don't play audio
         return pollVideoResult(FAL_LTX_I2V_FAST_SUBMIT, body, 120, 3000, "LTX-2.3 fast");
     }
@@ -1194,13 +1194,13 @@ public class FalAPI {
      * @param imageUrl source image (public URL or base64 data URI)
      * @param prompt   motion/scene description
      */
-    public String generateVideoNormal(String imageUrl, String prompt) throws IOException, InterruptedException {
+    public String generateVideoNormal(String imageUrl, String prompt, String aspectRatio) throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
         body.addProperty("prompt", prompt);
         body.addProperty("image_url", imageUrl);
         body.addProperty("resolution", "480p");     // smallest -> lighter to decode for in-world playback
         body.addProperty("duration", "4");
-        body.addProperty("aspect_ratio", "auto");
+        body.addProperty("aspect_ratio", aspectRatio); // "16:9", "9:16", "1:1", or "auto"
         body.addProperty("generate_audio", false);
         body.addProperty("bitrate_mode", "standard");
         return pollVideoResult(FAL_SEEDANCE_I2V_SUBMIT, body, 160, 4000, "Seedance 2.0");

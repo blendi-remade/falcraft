@@ -5,6 +5,7 @@ import com.falcraft.util.ImageCanvasManager;
 import com.falcraft.util.MapImageFactory;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.client.Minecraft;
@@ -22,29 +23,52 @@ import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.arg
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
 /**
- * Generates an AI image and gives it as a tagged map item. Hold the item to place it
- * in the world as a full-fidelity canvas; break a placed canvas to get the item back.
+ * Generates an AI image and gives it as a tagged map item (see {@link ImageCanvasManager}).
  * Usage:
- *   /fal image <prompt>        - high fidelity (Nano Banana Pro)
- *   /fal image fast <prompt>   - quick/cheap (Z-Image Turbo)
- *   /fal image cancel          - cancel the current placement preview
- *   /fal image clear           - remove all placed canvases in this dimension
+ *   /fal image [square|landscape|portrait] <prompt>        - high fidelity (Nano Banana Pro)
+ *   /fal image fast [square|landscape|portrait] <prompt>   - quick/cheap (Z-Image Turbo)
+ *   /fal image cancel | clear
+ * Aspect defaults to square. The chosen orientation also drives the video aspect ratio
+ * (see VideoCommand), since image-to-video derives orientation from the source image.
  */
 public class ImageCommand {
     private static final Logger LOGGER = LoggerFactory.getLogger("ImageCommand");
 
+    /** Aspect presets mapped to each image model's parameter. */
+    public enum Aspect {
+        SQUARE("square_hd", "1:1"),
+        LANDSCAPE("landscape_16_9", "16:9"),
+        PORTRAIT("portrait_16_9", "9:16");
+
+        public final String zImageSize;  // Z-Image Turbo image_size
+        public final String nanoBanana;  // Nano Banana Pro aspect_ratio
+
+        Aspect(String zImageSize, String nanoBanana) {
+            this.zImageSize = zImageSize;
+            this.nanoBanana = nanoBanana;
+        }
+    }
+
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
-        dispatcher.register(literal("fal")
-                .then(literal("image")
-                        .then(argument("prompt", StringArgumentType.greedyString())
-                                .executes(ctx -> execute(ctx, false)))
-                        .then(literal("fast")
-                                .then(argument("prompt", StringArgumentType.greedyString())
-                                        .executes(ctx -> execute(ctx, true))))
-                        .then(literal("cancel")
-                                .executes(ImageCommand::executeCancel))
-                        .then(literal("clear")
-                                .executes(ImageCommand::executeClear))));
+        LiteralArgumentBuilder<FabricClientCommandSource> image = literal("image");
+        withAspectBranches(image, false);                       // /fal image [aspect] <prompt>  (Nano Banana Pro)
+        image.then(withAspectBranches(literal("fast"), true));  // /fal image fast [aspect] <prompt>  (Z-Image)
+        image.then(literal("cancel").executes(ImageCommand::executeCancel));
+        image.then(literal("clear").executes(ImageCommand::executeClear));
+        dispatcher.register(literal("fal").then(image));
+    }
+
+    /** Adds a default (square) prompt plus a literal per aspect, all under the given node. */
+    private static LiteralArgumentBuilder<FabricClientCommandSource> withAspectBranches(
+            LiteralArgumentBuilder<FabricClientCommandSource> node, boolean fast) {
+        node.then(argument("prompt", StringArgumentType.greedyString())
+                .executes(ctx -> execute(ctx, fast, Aspect.SQUARE)));
+        for (Aspect aspect : Aspect.values()) {
+            node.then(literal(aspect.name().toLowerCase())
+                    .then(argument("prompt", StringArgumentType.greedyString())
+                            .executes(ctx -> execute(ctx, fast, aspect))));
+        }
+        return node;
     }
 
     private static int executeCancel(CommandContext<FabricClientCommandSource> context) {
@@ -63,7 +87,7 @@ public class ImageCommand {
         return 1;
     }
 
-    private static int execute(CommandContext<FabricClientCommandSource> context, boolean fast) {
+    private static int execute(CommandContext<FabricClientCommandSource> context, boolean fast, Aspect aspect) {
         String prompt = StringArgumentType.getString(context, "prompt");
         FabricClientCommandSource source = context.getSource();
         String model = fast ? "Z-Image Turbo" : "Nano Banana Pro";
@@ -78,15 +102,16 @@ public class ImageCommand {
         }
         UUID playerUuid = mc.player.getUUID();
 
-        source.sendFeedback(Component.literal("§d[fal] Generating image with §b" + model + "§d..."));
+        source.sendFeedback(Component.literal("§d[fal] Generating §b" + aspect.name().toLowerCase()
+                + "§d image with §b" + model + "§d..."));
         source.sendFeedback(Component.literal("§d[fal] Prompt: \"" + prompt + "\""));
 
         new Thread(() -> {
             try {
                 FalAPI falApi = new FalAPI();
                 String imageUrl = fast
-                        ? falApi.generatePictureZImage(prompt)
-                        : falApi.generatePictureNanoBanana(prompt);
+                        ? falApi.generatePictureZImage(prompt, aspect.zImageSize)
+                        : falApi.generatePictureNanoBanana(prompt, aspect.nanoBanana);
 
                 byte[] png = falApi.downloadFile(imageUrl);
                 LOGGER.info("Downloaded picture ({} bytes)", png.length);
