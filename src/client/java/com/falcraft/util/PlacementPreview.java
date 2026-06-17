@@ -1,6 +1,7 @@
 package com.falcraft.util;
 
 import com.falcraft.network.StructurePlacementNetworking;
+import com.falcraft.util.BlockMapper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -54,12 +55,19 @@ public class PlacementPreview {
     
     // Animated placement state
     private static boolean isAnimatingPlacement = false;
-    private static List<List<Map.Entry<BlockPos, Integer>>> layersByY = null;
+    private static List<List<Map.Entry<BlockPos, BlockState>>> layersByY = null;
     private static int currentLayerIndex = 0;
     private static BlockPos placementOrigin = null;
     private static int placementRotation = 0; // Rotation to apply during placement
     private static int placementGridSize = 0; // Grid size for rotation calculation
     private static final int LAYERS_PER_TICK = 3; // Place 3 Y-levels per tick for smooth animation
+
+    /**
+     * Material filter to apply during placement (null = use full palette).
+     * Set via startPlacementWithMaterials(); held here so it survives the gap
+     * between generation completing and the player confirming placement.
+     */
+    private static List<String> pendingMaterials = null;
     
     /**
      * Starts placement preview mode with the given voxel grid
@@ -67,6 +75,7 @@ public class PlacementPreview {
      */
     public static void startPlacement(Voxelizer.VoxelGrid grid) {
         pendingGrid = grid;
+        pendingMaterials = null;
         isActive = true;
         isStreaming = false;
         rotationIndex = 0;
@@ -78,6 +87,16 @@ public class PlacementPreview {
         surfaceVoxels = extractSurfaceVoxels(grid);
         LOGGER.info("Started placement preview mode with {} voxels, {} surface voxels", 
             grid.voxels().size(), surfaceVoxels.size());
+    }
+
+    /**
+     * Like {@link #startPlacement} but stores a material filter that is applied
+     * when the player confirms placement.  The filter persists until placement
+     * finishes or is cancelled, then is cleared automatically.
+     */
+    public static void startPlacementWithMaterials(Voxelizer.VoxelGrid grid, List<String> materials) {
+        startPlacement(grid);
+        pendingMaterials = (materials != null && !materials.isEmpty()) ? materials : null;
     }
     
     // ==================== STREAMING MODE ====================
@@ -841,6 +860,15 @@ public class PlacementPreview {
             LOGGER.info("Starting animated placement of {} blocks (rotation: {}°, pitch: {}°)",
                 pendingGrid.voxels().size(), rotationIndex * 90, pitchIndex * 90);
 
+            // Apply material filter now — this is when getClosestBlock() will be called.
+            // (The filter was deliberately NOT cleared after generation so it survives here.)
+            if (pendingMaterials != null && !pendingMaterials.isEmpty()) {
+                BlockMapper.setMaterialFilter(pendingMaterials);
+                LOGGER.info("Applying material filter for placement: {}", pendingMaterials);
+            } else {
+                BlockMapper.clearMaterialFilter();
+            }
+
             // Calculate placement origin and save rotation state
             BlockPos baseOrigin = calculatePreviewOrigin();
             placementOrigin = baseOrigin.offset(0, yOffset, 0);
@@ -850,17 +878,21 @@ public class PlacementPreview {
             // Apply pitch and roll to voxels before placement
             Map<BlockPos, Integer> voxelsToPlace = applyPitchAndRoll(pendingGrid.voxels(), pendingGrid.size());
 
-            // Sort voxels by Y coordinate (bottom to top)
-            Map<Integer, List<Map.Entry<BlockPos, Integer>>> voxelsByY = new TreeMap<>();
+            // Resolve RGB colors -> BlockStates NOW, while the filter is definitely active.
+            // Storing BlockState directly means tickAnimatedPlacement never calls getClosestBlock()
+            // and can't be affected by any later filter changes.
+            Map<Integer, List<Map.Entry<BlockPos, BlockState>>> resolvedByY = new TreeMap<>();
 
             for (Map.Entry<BlockPos, Integer> entry : voxelsToPlace.entrySet()) {
                 BlockPos voxelPos = entry.getKey();
+                BlockState blockState = BlockMapper.getClosestBlock(entry.getValue());
                 int y = voxelPos.getY();
-                voxelsByY.computeIfAbsent(y, k -> new ArrayList<>()).add(entry);
+                resolvedByY.computeIfAbsent(y, k -> new ArrayList<>())
+                           .add(Map.entry(voxelPos, blockState));
             }
-            
-            // Convert to list of layers (sorted by Y)
-            layersByY = new ArrayList<>(voxelsByY.values());
+
+            // Convert to list of layers (sorted by Y, bottom to top)
+            layersByY = new ArrayList<>(resolvedByY.values());
             currentLayerIndex = 0;
             isAnimatingPlacement = true;
             
@@ -881,8 +913,10 @@ public class PlacementPreview {
             LOGGER.info("Cancelled placement preview");
             isActive = false;
             pendingGrid = null;
+            pendingMaterials = null;
             surfaceVoxels = null;
-            
+            BlockMapper.clearMaterialFilter();
+
             // Also cancel streaming if active
             if (isStreaming) {
                 isStreaming = false;
@@ -1041,20 +1075,21 @@ public class PlacementPreview {
 
         if (isMultiplayer) {
             // --- MULTIPLAYER path ---
-            // Collect all blocks and send them to the server in one C2S packet.
-            // The server handler in StructurePlacementNetworking will place them with
-            // proper authority, so they persist and are visible to all players.
+            // All BlockStates were resolved at confirmPlacement() time.
+            // Convert each to its registry ID string and send in one packet.
             List<StructurePlacementNetworking.BlockData> blockDataList = new ArrayList<>();
 
             while (currentLayerIndex < layersByY.size()) {
-                List<Map.Entry<BlockPos, Integer>> layer = layersByY.get(currentLayerIndex);
-                for (Map.Entry<BlockPos, Integer> entry : layer) {
+                List<Map.Entry<BlockPos, BlockState>> layer = layersByY.get(currentLayerIndex);
+                for (Map.Entry<BlockPos, BlockState> entry : layer) {
                     BlockPos rotatedPos = applyPlacementRotation(entry.getKey());
+                    String blockId = net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                            .getKey(entry.getValue().getBlock()).toString();
                     blockDataList.add(new StructurePlacementNetworking.BlockData(
                         rotatedPos.getX(),
                         rotatedPos.getY(),
                         rotatedPos.getZ(),
-                        entry.getValue()
+                        blockId
                     ));
                 }
                 currentLayerIndex++;
@@ -1070,10 +1105,13 @@ public class PlacementPreview {
             layersByY = null;
             placementOrigin = null;
             currentLayerIndex = 0;
+            pendingMaterials = null;
+            BlockMapper.clearMaterialFilter();
             return;
         }
 
-        // --- SINGLEPLAYER path: place directly into the integrated server level, layer-by-layer ---
+        // --- SINGLEPLAYER path ---
+        // BlockStates are pre-resolved; just place them.
         Level level = getPlacementLevel(minecraft);
         if (level == null) {
             LOGGER.error("Level is null during animated placement!");
@@ -1085,17 +1123,12 @@ public class PlacementPreview {
         int blocksPlaced = 0;
 
         while (currentLayerIndex < layersByY.size() && layersPlaced < LAYERS_PER_TICK) {
-            List<Map.Entry<BlockPos, Integer>> layer = layersByY.get(currentLayerIndex);
+            List<Map.Entry<BlockPos, BlockState>> layer = layersByY.get(currentLayerIndex);
 
-            for (Map.Entry<BlockPos, Integer> entry : layer) {
-                BlockPos voxelPos = entry.getKey();
-                int color = entry.getValue();
-
-                BlockPos rotatedPos = applyPlacementRotation(voxelPos);
+            for (Map.Entry<BlockPos, BlockState> entry : layer) {
+                BlockPos rotatedPos = applyPlacementRotation(entry.getKey());
                 BlockPos worldPos = placementOrigin.offset(rotatedPos);
-                BlockState blockState = BlockMapper.getClosestBlock(color);
-
-                level.setBlock(worldPos, blockState, 3);
+                level.setBlock(worldPos, entry.getValue(), 3);
                 blocksPlaced++;
             }
 
@@ -1109,6 +1142,8 @@ public class PlacementPreview {
             layersByY = null;
             placementOrigin = null;
             currentLayerIndex = 0;
+            pendingMaterials = null;
+            BlockMapper.clearMaterialFilter();
         }
     }
     
@@ -1122,6 +1157,8 @@ public class PlacementPreview {
         placementRotation = 0;
         placementGridSize = 0;
         currentLayerIndex = 0;
+        pendingMaterials = null;
+        BlockMapper.clearMaterialFilter();
     }
     
     /**

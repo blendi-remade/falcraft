@@ -1,6 +1,6 @@
 package com.falcraft.commands;
 
-import com.falcraft.util.BlockPlacer;
+import com.falcraft.util.BlockMapper;
 import com.falcraft.util.FalAPI;
 import com.falcraft.util.GLBParser;
 import com.falcraft.util.PlacementPreview;
@@ -10,32 +10,49 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.List;
+import java.util.regex.Pattern;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
-import com.mojang.brigadier.suggestion.SuggestionProvider;
-
 /**
- * Command to generate 3D models from text prompts using fal AI
- * Usage: /fal generate <size> <prompt>          - Z-Image + SAM-3D (~30 seconds, default)
- *        /fal generate legacy <size> <prompt>   - Meshy-6 (~7 minutes, original method)
- * Size: 16-128 (recommended: 32=fast, 48=balanced, 64=detailed)
+ * Usage:
+ *   /fal generate <size> <prompt>
+ *   /fal generate <size> materials <block,list> <prompt>
+ *   /fal generate legacy <size> <prompt>
+ *   /fal generate legacy <size> materials <block,list> <prompt>
+ *
+ * "materials" is an optional subcommand.  Its argument is a single greedy
+ * string of the form:  minecraft:stone,minecraft:oak_log a prompt here
+ * Everything up to the first space that follows the comma-separated block
+ * list is parsed as block IDs; the rest is the prompt.
+ *
+ * This approach is necessary because Brigadier cannot parse two consecutive
+ * greedy/space-delimited arguments in the same branch.
  */
 public class GenerateCommand {
     private static final Logger LOGGER = LoggerFactory.getLogger("GenerateCommand");
-    
-    // Suggest all size values (16-128 in increments of 16) so they appear before "legacy" in autocomplete
-    private static final SuggestionProvider<FabricClientCommandSource> SIZE_SUGGESTIONS = (context, builder) -> {
+
+    /**
+     * Matches a single block ID token: optional-namespace:name
+     * e.g. "minecraft:stone" or "stone" (bare names are also valid in-game).
+     */
+    private static final Pattern BLOCK_ID_TOKEN = Pattern.compile("[a-z0-9_.-]+:[a-z0-9_./-]+");
+
+    // -------------------------------------------------------------------------
+    // Suggestion providers
+    // -------------------------------------------------------------------------
+
+    private static final SuggestionProvider<FabricClientCommandSource> SIZE_SUGGESTIONS = (ctx, builder) -> {
         builder.suggest(16, Component.literal("Tiny"));
         builder.suggest(32, Component.literal("Small"));
         builder.suggest(48, Component.literal("Medium"));
@@ -46,56 +63,248 @@ public class GenerateCommand {
         builder.suggest(128, Component.literal("Maximum"));
         return builder.buildFuture();
     };
-    
+
+    /**
+     * Tab-completes the combined "block_list prompt" greedy argument.
+     *
+     * While the cursor is still inside the block list (no space present, or
+     * the text so far looks entirely like comma-separated IDs) we suggest
+     * block names.  Once the user has typed a space after the last ID we
+     * stop suggesting so they can type the prompt freely.
+     */
+    private static final SuggestionProvider<FabricClientCommandSource> MATERIALS_GREEDY_SUGGESTIONS =
+            (ctx, builder) -> {
+        String remaining = builder.getRemaining();
+
+        // If there is a space, the user has moved on to the prompt — stop suggesting.
+        if (remaining.contains(" ")) {
+            return builder.buildFuture();
+        }
+
+        // Complete the last comma-separated token.
+        int commaIdx = remaining.lastIndexOf(',');
+        String prefix  = commaIdx >= 0 ? remaining.substring(0, commaIdx + 1) : "";
+        String current = commaIdx >= 0 ? remaining.substring(commaIdx + 1)    : remaining;
+
+        for (String id : BlockMapper.getAllPaletteBlockIds()) {
+            if (id.toLowerCase().startsWith(current.toLowerCase())) {
+                builder.suggest(prefix + id);
+            }
+        }
+        return builder.buildFuture();
+    };
+
+    // -------------------------------------------------------------------------
+    // Command registration
+    // -------------------------------------------------------------------------
+
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
         dispatcher.register(literal("fal")
-                .then(literal("generate")
-                        // Default mode: /fal generate <size> <prompt> (Z-Image + SAM-3D)
-                        .then(argument("size", IntegerArgumentType.integer(16, 128))
-                                .suggests(SIZE_SUGGESTIONS)
-                                .then(argument("prompt", StringArgumentType.greedyString())
-                                        .executes(GenerateCommand::execute)))
-                        // Legacy mode: /fal generate legacy <size> <prompt> (Meshy-6)
-                        .then(literal("legacy")
-                                .then(argument("size", IntegerArgumentType.integer(16, 128))
-                                        .suggests(SIZE_SUGGESTIONS)
-                                        .then(argument("prompt", StringArgumentType.greedyString())
-                                                .executes(GenerateCommand::executeLegacy))))));
+            .then(literal("generate")
+                .then(argument("size", IntegerArgumentType.integer(16, 128))
+                    .suggests(SIZE_SUGGESTIONS)
+                    // /fal generate <size> materials <block,list and prompt as greedy>
+                    .then(literal("materials")
+                        .then(argument("materials_and_prompt", StringArgumentType.greedyString())
+                            .suggests(MATERIALS_GREEDY_SUGGESTIONS)
+                            .executes(ctx -> {
+                                MaterialsAndPrompt mp = splitMaterialsAndPrompt(
+                                    StringArgumentType.getString(ctx, "materials_and_prompt"),
+                                    ctx.getSource());
+                                return mp == null ? 0 : execute(ctx, mp.prompt, mp.materials);
+                            })))
+                    // /fal generate <size> <prompt>  (no material filter)
+                    .then(argument("prompt", StringArgumentType.greedyString())
+                        .executes(ctx -> execute(ctx,
+                            StringArgumentType.getString(ctx, "prompt"), null))))
+
+                .then(literal("legacy")
+                    .then(argument("size", IntegerArgumentType.integer(16, 128))
+                        .suggests(SIZE_SUGGESTIONS)
+                        .then(literal("materials")
+                            .then(argument("materials_and_prompt", StringArgumentType.greedyString())
+                                .suggests(MATERIALS_GREEDY_SUGGESTIONS)
+                                .executes(ctx -> {
+                                    MaterialsAndPrompt mp = splitMaterialsAndPrompt(
+                                        StringArgumentType.getString(ctx, "materials_and_prompt"),
+                                        ctx.getSource());
+                                    return mp == null ? 0 : executeLegacy(ctx, mp.prompt, mp.materials);
+                                })))
+                        .then(argument("prompt", StringArgumentType.greedyString())
+                            .executes(ctx -> executeLegacy(ctx,
+                                StringArgumentType.getString(ctx, "prompt"), null)))))));
     }
-    
+
+    // -------------------------------------------------------------------------
+    // Parsing helpers
+    // -------------------------------------------------------------------------
+
+    private record MaterialsAndPrompt(List<String> materials, String prompt) {}
+
     /**
-     * Legacy generation mode using Meshy-6 (original method)
-     * Slower but uses UV-mapped textures (~7 minutes)
+     * Splits a string like "minecraft:stone,minecraft:oak_log a house on a hill"
+     * into a material list and a prompt.
+     *
+     * Strategy: the block-list is the leading run of comma-separated tokens that
+     * each match namespace:name.  The first space after that run ends the list.
+     *
+     * Returns null (and sends an error) if no prompt text is found after the list.
      */
-    private static int executeLegacy(CommandContext<FabricClientCommandSource> context) {
-        int size = IntegerArgumentType.getInteger(context, "size");
-        String prompt = StringArgumentType.getString(context, "prompt");
-        FabricClientCommandSource source = context.getSource();
-        
-        // Send initial feedback
-        source.sendFeedback(Component.literal("§e[fal] Starting §7LEGACY§e 3D generation (" + size + "x" + size + "x" + size + ")"));
+    private static MaterialsAndPrompt splitMaterialsAndPrompt(String raw, FabricClientCommandSource source) {
+        // Find the first space — everything before it is the block list, after is the prompt.
+        int spaceIdx = raw.indexOf(' ');
+        if (spaceIdx < 0) {
+            source.sendError(Component.literal(
+                "§c[fal] Usage: materials <block,list> <prompt>   " +
+                "Example: materials minecraft:stone,minecraft:cobblestone a castle"));
+            return null;
+        }
+
+        String blockPart  = raw.substring(0, spaceIdx).trim();
+        String promptPart = raw.substring(spaceIdx + 1).trim();
+
+        if (promptPart.isEmpty()) {
+            source.sendError(Component.literal("§c[fal] Prompt cannot be empty after the block list."));
+            return null;
+        }
+
+        List<String> materials = Arrays.asList(blockPart.split(","));
+        return new MaterialsAndPrompt(materials, promptPart);
+    }
+
+    /**
+     * Apply (or clear) the material filter and warn about unrecognised IDs.
+     */
+    private static void applyMaterialFilter(List<String> materials, FabricClientCommandSource source) {
+        if (materials == null || materials.isEmpty()) {
+            BlockMapper.clearMaterialFilter();
+            return;
+        }
+        List<String> unknown = BlockMapper.setMaterialFilter(materials);
+        source.sendFeedback(Component.literal(
+            "§e[fal] Material filter: " + String.join(", ", materials)));
+        if (!unknown.isEmpty()) {
+            source.sendFeedback(Component.literal(
+                "§6[fal] Warning: unrecognised block IDs ignored: " + String.join(", ", unknown)));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Default generation (Z-Image + SAM-3D)
+    // -------------------------------------------------------------------------
+
+    private static int execute(CommandContext<FabricClientCommandSource> ctx,
+                               String prompt,
+                               List<String> materials) {
+        int size = IntegerArgumentType.getInteger(ctx, "size");
+        FabricClientCommandSource source = ctx.getSource();
+
+        source.sendFeedback(Component.literal(
+            "§e[fal] Starting 3D generation (" + size + "x" + size + "x" + size + ")"));
         source.sendFeedback(Component.literal("§e[fal] Prompt: \"" + prompt + "\""));
-        source.sendFeedback(Component.literal("§e[fal] Using Meshy-6 pipeline (about 7 minutes)"));
-        
-        // Run the generation process asynchronously to avoid blocking the game thread
+        source.sendFeedback(Component.literal("§e[fal] Using Z-Image + SAM-3D (about 30 seconds)"));
+        if (materials != null && !materials.isEmpty()) {
+            source.sendFeedback(Component.literal(
+                "§e[fal] Material filter: " + String.join(", ", materials)));
+        }
+
         new Thread(() -> {
             try {
-                // Step 1: Call fal API to generate 3D model
-                Minecraft.getInstance().execute(() -> 
-                    source.sendFeedback(Component.literal("§e[fal] Generating 3D model with AI...")));
-                
-                FalAPI falApi = new FalAPI();
-                FalAPI.ModelResult modelResult = falApi.generateModel(prompt);
-                
                 Minecraft.getInstance().execute(() ->
-                    source.sendFeedback(Component.literal("§e[fal] Model generated! Processing...")));
-                
-                // Step 2: Extract embedded texture from GLB (more reliable than external texture_urls)
+                    source.sendFeedback(Component.literal("§e[fal] [1/4] Generating 2D image...")));
+
+                FalAPI falApi = new FalAPI();
+                FalAPI.ModelResult modelResult = falApi.generateModelFast(prompt);
+
+                LOGGER.info("Received GLB model ({} bytes)", modelResult.glbData().length);
+                Minecraft.getInstance().execute(() ->
+                    source.sendFeedback(Component.literal("§e[fal] [2/4] 3D model generated! Processing...")));
+
                 TextureSampler textureSampler = null;
                 try {
+                    byte[] embeddedTexture = GLBParser.extractEmbeddedTexture(modelResult.glbData());
+                    if (embeddedTexture != null) {
+                        textureSampler = new TextureSampler(embeddedTexture);
+                    }
+                } catch (Exception e) {
+                    LOGGER.error("Failed to extract embedded texture: {}", e.getMessage(), e);
+                }
+
+                Minecraft.getInstance().execute(() ->
+                    source.sendFeedback(Component.literal("§e[fal] [3/4] Parsing 3D model...")));
+
+                GLBParser.MeshData meshData = GLBParser.parse(modelResult.glbData(), textureSampler);
+
+                final TextureSampler finalSampler = textureSampler;
+                Minecraft.getInstance().execute(() ->
+                    source.sendFeedback(Component.literal("§e[fal] [4/4] Converting to voxels...")));
+
+                Voxelizer.VoxelGrid voxelGrid = Voxelizer.voxelize(meshData, size, finalSampler);
+
+                if (voxelGrid.voxels().isEmpty()) {
                     Minecraft.getInstance().execute(() ->
-                        source.sendFeedback(Component.literal("§e[fal] Extracting texture from GLB...")));
-                    
+                        source.sendError(Component.literal("§c[fal] Error: Generated model has no voxels!")));
+                    return;
+                }
+
+                Minecraft.getInstance().execute(() -> {
+                    try {
+                        PlacementPreview.startPlacementWithMaterials(voxelGrid, materials);
+                        source.sendFeedback(Component.literal(
+                            "§a[fal] ✓ Generation complete! " + voxelGrid.voxels().size() + " blocks ready."));
+                        source.sendFeedback(Component.literal("§e[fal] Right-click to place, G to rotate!"));
+                    } catch (Exception e) {
+                        source.sendError(Component.literal("§c[fal] Error preparing placement: " + e.getMessage()));
+                        LOGGER.error("Error preparing placement", e);
+                    }
+                });
+
+            } catch (IllegalStateException e) {
+                Minecraft.getInstance().execute(() ->
+                    source.sendError(Component.literal(
+                        "§c[fal] Error: API key not configured. Use /fal setkey <key>")));
+            } catch (Exception e) {
+                Minecraft.getInstance().execute(() ->
+                    source.sendError(Component.literal("§c[fal] Error during generation: " + e.getMessage())));
+                LOGGER.error("Error during 3D generation", e);
+            }
+        }, "fal-Generate-Thread").start();
+
+        return 1;
+    }
+
+    // -------------------------------------------------------------------------
+    // Legacy generation (Meshy-6)
+    // -------------------------------------------------------------------------
+
+    private static int executeLegacy(CommandContext<FabricClientCommandSource> ctx,
+                                     String prompt,
+                                     List<String> materials) {
+        int size = IntegerArgumentType.getInteger(ctx, "size");
+        FabricClientCommandSource source = ctx.getSource();
+
+        source.sendFeedback(Component.literal(
+            "§e[fal] Starting §7LEGACY§e 3D generation (" + size + "x" + size + "x" + size + ")"));
+        source.sendFeedback(Component.literal("§e[fal] Prompt: \"" + prompt + "\""));
+        source.sendFeedback(Component.literal("§e[fal] Using Meshy-6 pipeline (about 7 minutes)"));
+        if (materials != null && !materials.isEmpty()) {
+            source.sendFeedback(Component.literal(
+                "§e[fal] Material filter: " + String.join(", ", materials)));
+        }
+
+        new Thread(() -> {
+            try {
+                Minecraft.getInstance().execute(() ->
+                    source.sendFeedback(Component.literal("§e[fal] Generating 3D model with AI...")));
+
+                FalAPI falApi = new FalAPI();
+                FalAPI.ModelResult modelResult = falApi.generateModel(prompt);
+
+                Minecraft.getInstance().execute(() ->
+                    source.sendFeedback(Component.literal("§e[fal] Model generated! Processing...")));
+
+                TextureSampler textureSampler = null;
+                try {
                     byte[] embeddedTexture = GLBParser.extractEmbeddedTexture(modelResult.glbData());
                     if (embeddedTexture != null) {
                         textureSampler = new TextureSampler(embeddedTexture);
@@ -103,161 +312,54 @@ public class GenerateCommand {
                             source.sendFeedback(Component.literal("§e[fal] Embedded texture extracted!")));
                     } else {
                         Minecraft.getInstance().execute(() ->
-                            source.sendFeedback(Component.literal("§6[fal] No embedded texture, will use vertex colors")));
+                            source.sendFeedback(Component.literal("§6[fal] No embedded texture, using vertex colors")));
                     }
                 } catch (Exception e) {
                     LOGGER.error("Failed to extract embedded texture: {}", e.getMessage(), e);
-                    Minecraft.getInstance().execute(() ->
-                        source.sendFeedback(Component.literal("§6[fal] Could not extract texture")));
                 }
-                
-                // Step 3: Parse GLB file with texture sampling
+
                 Minecraft.getInstance().execute(() ->
                     source.sendFeedback(Component.literal("§e[fal] Parsing 3D model...")));
-                
+
                 GLBParser.MeshData meshData = GLBParser.parse(modelResult.glbData(), textureSampler);
-                
-                // Step 4: Voxelize the mesh with per-voxel texture sampling
-                final TextureSampler finalTextureSampler = textureSampler;
+
+                final TextureSampler finalSampler = textureSampler;
                 Minecraft.getInstance().execute(() ->
-                    source.sendFeedback(Component.literal("§e[fal] Converting to voxels (" + 
-                            size + "x" + size + "x" + size + ")...")));
-                
-                // Pass the texture sampler to enable per-voxel UV-based color sampling
-                Voxelizer.VoxelGrid voxelGrid = Voxelizer.voxelize(meshData, size, finalTextureSampler);
+                    source.sendFeedback(Component.literal("§e[fal] Converting to voxels...")));
+
+                Voxelizer.VoxelGrid voxelGrid = Voxelizer.voxelize(meshData, size, finalSampler);
                 LOGGER.info("Voxelized mesh: {} voxels", voxelGrid.voxels().size());
-                
+
                 if (voxelGrid.voxels().isEmpty()) {
                     Minecraft.getInstance().execute(() ->
                         source.sendError(Component.literal("§c[fal] Error: Generated model has no voxels!")));
                     return;
                 }
-                
-                // Step 5: Enter placement preview mode (MUST run on main thread)
+
                 Minecraft.getInstance().execute(() -> {
                     try {
-                        PlacementPreview.startPlacement(voxelGrid);
-                        
+                        PlacementPreview.startPlacementWithMaterials(voxelGrid, materials);
                         source.sendFeedback(Component.literal(
-                                "§a[fal] ✓ §7LEGACY§a generation complete! " + voxelGrid.voxels().size() + " blocks ready."));
-                        source.sendFeedback(Component.literal(
-                                "§e[fal] Right-click to place, G to rotate!"));
+                            "§a[fal] ✓ §7LEGACY§a generation complete! " +
+                            voxelGrid.voxels().size() + " blocks ready."));
+                        source.sendFeedback(Component.literal("§e[fal] Right-click to place, G to rotate!"));
                     } catch (Exception e) {
-                        String errorMsg = e.getMessage();
-                        source.sendError(Component.literal("§c[fal] Error preparing placement: " + errorMsg));
+                        source.sendError(Component.literal("§c[fal] Error preparing placement: " + e.getMessage()));
                         LOGGER.error("Error preparing placement", e);
                     }
                 });
-                
+
             } catch (IllegalStateException e) {
-                // Handle missing API key
                 Minecraft.getInstance().execute(() ->
-                    source.sendError(Component.literal("§c[fal] Error: API key not configured. Use /fal setkey <key>")));
-                LOGGER.error("API key not configured", e);
+                    source.sendError(Component.literal(
+                        "§c[fal] Error: API key not configured. Use /fal setkey <key>")));
             } catch (Exception e) {
-                String errorMsg = e.getMessage();
                 Minecraft.getInstance().execute(() ->
-                    source.sendError(Component.literal("§c[fal] Error during legacy generation: " + errorMsg)));
-                LOGGER.error("Error during LEGACY 3D generation process", e);
+                    source.sendError(Component.literal("§c[fal] Error during legacy generation: " + e.getMessage())));
+                LOGGER.error("Error during LEGACY 3D generation", e);
             }
         }, "fal-LegacyGenerate-Thread").start();
-        
-        return 1;
-    }
-    
-    /**
-     * Default generation mode using Z-Image Turbo + SAM-3D pipeline
-     * Fast and high quality (~30 seconds)
-     */
-    private static int execute(CommandContext<FabricClientCommandSource> context) {
-        int size = IntegerArgumentType.getInteger(context, "size");
-        String prompt = StringArgumentType.getString(context, "prompt");
-        FabricClientCommandSource source = context.getSource();
-        
-        // Send initial feedback
-        source.sendFeedback(Component.literal("§e[fal] Starting 3D generation (" + size + "x" + size + "x" + size + ")"));
-        source.sendFeedback(Component.literal("§e[fal] Prompt: \"" + prompt + "\""));
-        source.sendFeedback(Component.literal("§e[fal] Using Z-Image + SAM-3D (about 30 seconds)"));
-        
-        // Run the generation process asynchronously
-        new Thread(() -> {
-            try {
-                LOGGER.info("Starting 3D model generation process...");
-                
-                // Step 1: Generate image and convert to 3D
-                Minecraft.getInstance().execute(() -> 
-                    source.sendFeedback(Component.literal("§e[fal] [1/4] Generating 2D image...")));
-                
-                FalAPI falApi = new FalAPI();
-                
-                // This chains Z-Image (text→image) + SAM-3 (image→3D)
-                // The generateModelFast method handles both steps internally
-                FalAPI.ModelResult modelResult = falApi.generateModelFast(prompt);
-                
-                LOGGER.info("Received GLB model ({} bytes)", modelResult.glbData().length);
-                Minecraft.getInstance().execute(() ->
-                    source.sendFeedback(Component.literal("§e[fal] [2/4] 3D model generated! Processing...")));
-                
-                // Step 2: Extract embedded texture from GLB
-                TextureSampler textureSampler = null;
-                try {
-                    byte[] embeddedTexture = GLBParser.extractEmbeddedTexture(modelResult.glbData());
-                    if (embeddedTexture != null) {
-                        textureSampler = new TextureSampler(embeddedTexture);
-                    }
-                } catch (Exception e) {
-                    LOGGER.error("Failed to extract embedded texture: {}", e.getMessage(), e);
-                }
-                
-                // Step 3: Parse GLB file
-                Minecraft.getInstance().execute(() ->
-                    source.sendFeedback(Component.literal("§e[fal] [3/4] Parsing 3D model...")));
-                
-                GLBParser.MeshData meshData = GLBParser.parse(modelResult.glbData(), textureSampler);
-                
-                // Step 4: Voxelize the mesh
-                final TextureSampler finalTextureSampler = textureSampler;
-                Minecraft.getInstance().execute(() ->
-                    source.sendFeedback(Component.literal("§e[fal] [4/4] Converting to voxels (" + 
-                            size + "x" + size + "x" + size + ")...")));
-                
-                Voxelizer.VoxelGrid voxelGrid = Voxelizer.voxelize(meshData, size, finalTextureSampler);
-                
-                if (voxelGrid.voxels().isEmpty()) {
-                    Minecraft.getInstance().execute(() ->
-                        source.sendError(Component.literal("§c[fal] Error: Generated model has no voxels!")));
-                    return;
-                }
-                
-                // Step 5: Enter placement preview mode
-                Minecraft.getInstance().execute(() -> {
-                    try {
-                        PlacementPreview.startPlacement(voxelGrid);
-                        
-                        source.sendFeedback(Component.literal(
-                                "§a[fal] ✓ Generation complete! " + voxelGrid.voxels().size() + " blocks ready."));
-                        source.sendFeedback(Component.literal(
-                                "§e[fal] Right-click to place, G to rotate!"));
-                    } catch (Exception e) {
-                        String errorMsg = e.getMessage();
-                        source.sendError(Component.literal("§c[fal] Error preparing placement: " + errorMsg));
-                        LOGGER.error("Error preparing placement", e);
-                    }
-                });
-                
-            } catch (IllegalStateException e) {
-                Minecraft.getInstance().execute(() ->
-                    source.sendError(Component.literal("§c[fal] Error: API key not configured. Use /fal setkey <key>")));
-                LOGGER.error("API key not configured", e);
-            } catch (Exception e) {
-                String errorMsg = e.getMessage();
-                Minecraft.getInstance().execute(() ->
-                    source.sendError(Component.literal("§c[fal] Error during generation: " + errorMsg)));
-                LOGGER.error("Error during 3D generation process", e);
-            }
-        }, "fal-Generate-Thread").start();
-        
+
         return 1;
     }
 }
-

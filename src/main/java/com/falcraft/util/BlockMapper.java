@@ -1,13 +1,15 @@
 package com.falcraft.util;
 
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Maps RGB colors to the closest matching Minecraft blocks
@@ -20,6 +22,12 @@ public class BlockMapper {
     
     // Cache for color lookups
     private static final Map<Integer, BlockState> COLOR_CACHE = new HashMap<>();
+
+    /**
+     * When non-null, getClosestBlock() only selects from this subset of palette blocks.
+     * Null means "use the full palette" (default behaviour).
+     */
+    private static Map<Block, Integer> activePalette = null;
     
     static {
         // Curated palette: Clean concrete for primary colors + stone/wood for natural tones
@@ -161,7 +169,10 @@ public class BlockMapper {
     }
     
     /**
-     * Gets the closest matching Minecraft block for an RGB color
+     * Gets the closest matching Minecraft block for an RGB color.
+     * If a material filter has been set via {@link #setMaterialFilter}, only those
+     * blocks are considered; otherwise the full built-in palette is used.
+     *
      * @param rgb The color as an RGB integer (0xRRGGBB)
      * @return The closest matching block state
      */
@@ -170,42 +181,42 @@ public class BlockMapper {
         if (COLOR_CACHE.containsKey(rgb)) {
             return COLOR_CACHE.get(rgb);
         }
-        
+
         Block closestBlock = Blocks.WHITE_WOOL;
         double minDistance = Double.MAX_VALUE;
-        
+
         int r = (rgb >> 16) & 0xFF;
         int g = (rgb >> 8) & 0xFF;
         int b = rgb & 0xFF;
-        
-        // Convert to LAB for perceptually uniform color distance
+
         double[] labTarget = rgbToLab(r, g, b);
-        
-        // Find closest color using perceptually-weighted distance
-        for (Map.Entry<Block, Integer> entry : BLOCK_PALETTE.entrySet()) {
+
+        // Use the filtered palette if one has been set, otherwise the full palette
+        Map<Block, Integer> searchPalette = (activePalette != null) ? activePalette : BLOCK_PALETTE;
+
+        for (Map.Entry<Block, Integer> entry : searchPalette.entrySet()) {
             int blockColor = entry.getValue();
             int br = (blockColor >> 16) & 0xFF;
             int bg = (blockColor >> 8) & 0xFF;
             int bb = blockColor & 0xFF;
-            
+
             double[] labBlock = rgbToLab(br, bg, bb);
-            
-            // CIE76 Delta-E formula (perceptually uniform color difference)
+
+            // CIE76 Delta-E
             double distance = Math.sqrt(
                 Math.pow(labTarget[0] - labBlock[0], 2) +
                 Math.pow(labTarget[1] - labBlock[1], 2) +
                 Math.pow(labTarget[2] - labBlock[2], 2)
             );
-            
+
             if (distance < minDistance) {
                 minDistance = distance;
                 closestBlock = entry.getKey();
             }
         }
-        
+
         BlockState blockState = closestBlock.defaultBlockState();
         COLOR_CACHE.put(rgb, blockState);
-        
         return blockState;
     }
     
@@ -268,6 +279,83 @@ public class BlockMapper {
         return color != null ? color : 0x808080;
     }
     
+    /**
+     * Returns all block registry IDs present in the built-in palette, e.g. "minecraft:stone".
+     * Used to populate autocomplete suggestions for the -m / --materials flag.
+     */
+    public static List<String> getAllPaletteBlockIds() {
+        return BLOCK_PALETTE.keySet().stream()
+            .map(block -> BuiltInRegistries.BLOCK.getKey(block).toString())
+            .sorted()
+            .collect(Collectors.toList());
+    }
+
+    /**
+     * Restricts {@link #getClosestBlock} to the given block IDs.
+     * Blocks not in the built-in palette are warned about and skipped.
+     * Pass an empty or null list to reset to the full palette.
+     *
+     * @param blockIds Minecraft resource-location strings, e.g. "minecraft:stone"
+     * @return List of block IDs that were not recognised / not in the palette
+     */
+    public static List<String> setMaterialFilter(List<String> blockIds) {
+        COLOR_CACHE.clear();
+
+        if (blockIds == null || blockIds.isEmpty()) {
+            activePalette = null;
+            return Collections.emptyList();
+        }
+
+        Map<Block, Integer> filtered = new LinkedHashMap<>();
+        List<String> unknown = new ArrayList<>();
+
+        for (String id : blockIds) {
+            String trimmed = id.trim();
+            if (trimmed.isEmpty()) continue;
+
+            ResourceLocation loc = ResourceLocation.tryParse(trimmed);
+            if (loc == null) {
+                unknown.add(trimmed);
+                continue;
+            }
+
+            // Look the block up in the game registry
+            Block block = BuiltInRegistries.BLOCK.get(loc);
+            if (block == null || block == Blocks.AIR) {
+                // AIR is the registry's "not found" sentinel
+                unknown.add(trimmed);
+                continue;
+            }
+
+            Integer paletteColor = BLOCK_PALETTE.get(block);
+            if (paletteColor == null) {
+                // Block is valid but has no colour entry — assign its average texture
+                // colour as 0x808080 (neutral grey) so it still participates.
+                LOGGER.warn("Block {} is not in the built-in palette; using grey fallback", trimmed);
+                filtered.put(block, 0x808080);
+            } else {
+                filtered.put(block, paletteColor);
+            }
+        }
+
+        if (filtered.isEmpty()) {
+            LOGGER.warn("Material filter produced no usable blocks; reverting to full palette");
+            activePalette = null;
+        } else {
+            activePalette = filtered;
+        }
+
+        return unknown;
+    }
+
+    /**
+     * Resets the material filter so the full palette is used again.
+     */
+    public static void clearMaterialFilter() {
+        activePalette = null;
+        COLOR_CACHE.clear();
+    }
+
     /**
      * Clears the color cache
      */
