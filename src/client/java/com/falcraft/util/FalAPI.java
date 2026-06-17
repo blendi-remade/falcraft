@@ -1063,5 +1063,109 @@ public class FalAPI {
         // Step 2: Convert image to a Gaussian splat with TripoSplat
         return generateSplatWithTripoSplat(imageUrl, numGaussians);
     }
+
+    // ==================== IMAGE MODE: standalone picture generation ====================
+    // Unlike the 3D image helpers, these do NOT augment the prompt for segmentation
+    // (no "white background, single subject" suffix) - we want the picture as prompted.
+
+    /**
+     * Generates a high-fidelity picture from a text prompt using Nano Banana Pro.
+     * @param prompt The text prompt (used as-is)
+     * @return The URL of the generated image
+     */
+    public String generatePictureNanoBanana(String prompt) throws IOException, InterruptedException {
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("prompt", prompt);
+        requestBody.addProperty("num_images", 1);
+        requestBody.addProperty("aspect_ratio", "1:1");
+        requestBody.addProperty("output_format", "png");
+        requestBody.addProperty("resolution", "1K");
+        return pollImageResult(FAL_NANOBANANA_QUEUE_SUBMIT, requestBody, 60, 2000, "Nano Banana Pro");
+    }
+
+    /**
+     * Generates a quick, cheap picture from a text prompt using Z-Image Turbo.
+     * @param prompt The text prompt (used as-is)
+     * @return The URL of the generated image
+     */
+    public String generatePictureZImage(String prompt) throws IOException, InterruptedException {
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("prompt", prompt);
+        requestBody.addProperty("image_size", "square_hd");
+        requestBody.addProperty("num_inference_steps", 8);
+        requestBody.addProperty("num_images", 1);
+        requestBody.addProperty("enable_safety_checker", true);
+        requestBody.addProperty("output_format", "png");
+        return pollImageResult(FAL_ZIMAGE_QUEUE_SUBMIT, requestBody, 30, 1000, "Z-Image Turbo");
+    }
+
+    /**
+     * Submits an image-generation request to a fal queue endpoint, polls until done,
+     * and returns the first image URL. Shared by the picture generators above.
+     */
+    private String pollImageResult(String endpoint, JsonObject requestBody, int maxAttempts,
+            long pollMillis, String label) throws IOException, InterruptedException {
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(requestBody)))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("{} queue submit error: {} - {}", label, submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit " + label + " request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        boolean completed = false;
+        int attempts = 0;
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(pollMillis);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException(label + " generation failed");
+                }
+            }
+        }
+        if (!completed) {
+            throw new IOException(label + " generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get {} result: {} - {}", label, resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get " + label + " result from fal");
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        String imageUrl = resultJson.getAsJsonArray("images")
+                .get(0).getAsJsonObject()
+                .get("url").getAsString();
+        LOGGER.info("{} picture generated: {}", label, imageUrl);
+        return imageUrl;
+    }
 }
 
