@@ -6,6 +6,7 @@ import com.falcraft.commands.RemixCommand;
 import com.falcraft.commands.CraftCommand;
 import com.falcraft.commands.SplatCommand;
 import com.falcraft.commands.ImageCommand;
+import com.falcraft.commands.VideoCommand;
 import com.falcraft.commands.StreamCommand;
 import com.falcraft.render.GhostBlockRenderer;
 import com.falcraft.render.HotbarCanvasOverlay;
@@ -58,6 +59,7 @@ public class FalcraftClient implements ClientModInitializer {
             CraftCommand.register(dispatcher);   // Nano Banana Pro + Hunyuan 3D
             SplatCommand.register(dispatcher);   // Nano Banana Pro + TripoSplat (experimental)
             ImageCommand.register(dispatcher);   // AI image -> in-world canvas
+            VideoCommand.register(dispatcher);   // image -> looping video canvas
         });
 
         // Register ghost block renderer for placement preview
@@ -94,6 +96,8 @@ public class FalcraftClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Load/unload persisted image canvases as the world changes (runs even with no player)
             ImageCanvasManager.tickLoad(client);
+            // Advance any playing video canvases
+            ImageCanvasManager.tickVideos();
 
             if (client.player == null) return;
 
