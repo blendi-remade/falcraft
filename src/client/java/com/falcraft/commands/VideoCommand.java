@@ -7,6 +7,7 @@ import com.falcraft.util.VideoDecoder;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.client.Minecraft;
@@ -65,20 +66,46 @@ public class VideoCommand {
         }
     }
 
-    public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
-        dispatcher.register(literal("fal")
-                .then(literal("video")
-                        .then(argument("prompt", StringArgumentType.greedyString())
-                                .executes(ctx -> execute(ctx, false)))
-                        .then(literal("fast")
-                                .then(argument("prompt", StringArgumentType.greedyString())
-                                        .executes(ctx -> execute(ctx, true))))));
+    /** Length presets mapped to a valid duration (seconds) per model. */
+    private enum Length {
+        SHORT(6, 5),
+        MEDIUM(10, 8),
+        LONG(12, 12);
+
+        final int ltxSeconds;       // LTX fast (even, 6..20)
+        final int seedanceSeconds;  // Seedance (4..15)
+
+        Length(int ltxSeconds, int seedanceSeconds) {
+            this.ltxSeconds = ltxSeconds;
+            this.seedanceSeconds = seedanceSeconds;
+        }
     }
 
-    private static int execute(CommandContext<FabricClientCommandSource> context, boolean fast) {
+    public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
+        LiteralArgumentBuilder<FabricClientCommandSource> video = literal("video");
+        withLengthBranches(video, false);                       // /fal video [length] <prompt>  (Seedance)
+        video.then(withLengthBranches(literal("fast"), true));  // /fal video fast [length] <prompt>  (LTX fast)
+        dispatcher.register(literal("fal").then(video));
+    }
+
+    /** Adds a default (short) prompt plus a literal per length preset under the given node. */
+    private static LiteralArgumentBuilder<FabricClientCommandSource> withLengthBranches(
+            LiteralArgumentBuilder<FabricClientCommandSource> node, boolean fast) {
+        node.then(argument("prompt", StringArgumentType.greedyString())
+                .executes(ctx -> execute(ctx, fast, Length.SHORT)));
+        for (Length len : Length.values()) {
+            node.then(literal(len.name().toLowerCase())
+                    .then(argument("prompt", StringArgumentType.greedyString())
+                            .executes(ctx -> execute(ctx, fast, len))));
+        }
+        return node;
+    }
+
+    private static int execute(CommandContext<FabricClientCommandSource> context, boolean fast, Length length) {
         String prompt = StringArgumentType.getString(context, "prompt");
         FabricClientCommandSource source = context.getSource();
         String model = fast ? "LTX-2.3 fast" : "Seedance 2.0";
+        int seconds = fast ? length.ltxSeconds : length.seedanceSeconds;
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.getSingleplayerServer() == null) {
@@ -102,7 +129,7 @@ public class VideoCommand {
         }
         UUID playerUuid = mc.player.getUUID();
 
-        source.sendFeedback(Component.literal("§d[fal] Animating your image with §b" + model + "§d..."));
+        source.sendFeedback(Component.literal("§d[fal] Animating your image with §b" + model + "§d (~" + seconds + "s)..."));
         source.sendFeedback(Component.literal("§d[fal] Prompt: \"" + prompt + "\""));
         source.sendFeedback(Component.literal("§7[fal] This can take a minute or two."));
 
@@ -117,8 +144,8 @@ public class VideoCommand {
 
                 FalAPI falApi = new FalAPI();
                 String videoUrl = fast
-                        ? falApi.generateVideoFast(dataUri, prompt, aspect)
-                        : falApi.generateVideoNormal(dataUri, prompt, aspect);
+                        ? falApi.generateVideoFast(dataUri, prompt, aspect, seconds)
+                        : falApi.generateVideoNormal(dataUri, prompt, aspect, seconds);
 
                 byte[] mp4 = falApi.downloadFile(videoUrl);
                 LOGGER.info("Downloaded video ({} bytes)", mp4.length);

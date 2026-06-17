@@ -1177,13 +1177,16 @@ public class FalAPI {
      * @param imageUrl source image (public URL or base64 data URI)
      * @param prompt   motion/scene description
      */
-    public String generateVideoFast(String imageUrl, String prompt, String aspectRatio) throws IOException, InterruptedException {
+    public String generateVideoFast(String imageUrl, String prompt, String aspectRatio, int durationSeconds) throws IOException, InterruptedException {
+        // LTX fast accepts even durations 6..20; >10s requires 25 fps.
+        int d = Math.max(6, Math.min(20, durationSeconds));
+        if (d % 2 != 0) d = Math.min(20, d + 1);
         JsonObject body = new JsonObject();
         body.addProperty("image_url", imageUrl);
         body.addProperty("prompt", prompt);
-        body.addProperty("duration", 6);          // fast model minimum
+        body.addProperty("duration", d);
         body.addProperty("resolution", "1080p");   // fast model minimum
-        body.addProperty("fps", 24);
+        body.addProperty("fps", 25);                // 25 fps so all durations (incl. >10s) are valid
         body.addProperty("aspect_ratio", aspectRatio); // "16:9", "9:16", or "auto" (LTX has no square)
         body.addProperty("generate_audio", false);  // we don't play audio
         return pollVideoResult(FAL_LTX_I2V_FAST_SUBMIT, body, 120, 3000, "LTX-2.3 fast");
@@ -1194,12 +1197,13 @@ public class FalAPI {
      * @param imageUrl source image (public URL or base64 data URI)
      * @param prompt   motion/scene description
      */
-    public String generateVideoNormal(String imageUrl, String prompt, String aspectRatio) throws IOException, InterruptedException {
+    public String generateVideoNormal(String imageUrl, String prompt, String aspectRatio, int durationSeconds) throws IOException, InterruptedException {
+        int d = Math.max(4, Math.min(15, durationSeconds)); // Seedance: 4..15
         JsonObject body = new JsonObject();
         body.addProperty("prompt", prompt);
         body.addProperty("image_url", imageUrl);
         body.addProperty("resolution", "480p");     // smallest -> lighter to decode for in-world playback
-        body.addProperty("duration", "4");
+        body.addProperty("duration", String.valueOf(d));
         body.addProperty("aspect_ratio", aspectRatio); // "16:9", "9:16", "1:1", or "auto"
         body.addProperty("generate_audio", false);
         body.addProperty("bitrate_mode", "standard");
