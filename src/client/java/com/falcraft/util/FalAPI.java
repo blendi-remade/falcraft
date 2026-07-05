@@ -29,6 +29,8 @@ public class FalAPI {
     private static final String FAL_HUNYUAN_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/hunyuan-3d/v3.1/pro/image-to-3d";
     private static final String FAL_TRIPOSPLAT_QUEUE_SUBMIT = "https://queue.fal.run/tripo3d/triposplat";
     private static final String FAL_FLUX_KLEIN_QUEUE_SUBMIT = "https://queue.fal.run/fal-ai/flux-2/klein/9b";
+    private static final String FAL_LTX_I2V_FAST_SUBMIT = "https://queue.fal.run/fal-ai/ltx-2.3/image-to-video/fast";
+    private static final String FAL_SEEDANCE_I2V_SUBMIT = "https://queue.fal.run/bytedance/seedance-2.0/image-to-video";
     private static final Gson GSON = new Gson();
     private final HttpClient httpClient;
     private final String apiKey;
@@ -1062,6 +1064,214 @@ public class FalAPI {
 
         // Step 2: Convert image to a Gaussian splat with TripoSplat
         return generateSplatWithTripoSplat(imageUrl, numGaussians);
+    }
+
+    // ==================== IMAGE MODE: standalone picture generation ====================
+    // Unlike the 3D image helpers, these do NOT augment the prompt for segmentation
+    // (no "white background, single subject" suffix) - we want the picture as prompted.
+
+    /**
+     * Generates a high-fidelity picture from a text prompt using Nano Banana Pro.
+     * @param prompt The text prompt (used as-is)
+     * @return The URL of the generated image
+     */
+    public String generatePictureNanoBanana(String prompt, String aspectRatio) throws IOException, InterruptedException {
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("prompt", prompt);
+        requestBody.addProperty("num_images", 1);
+        requestBody.addProperty("aspect_ratio", aspectRatio); // "1:1", "16:9", "9:16"
+        requestBody.addProperty("output_format", "png");
+        requestBody.addProperty("resolution", "1K");
+        return pollImageResult(FAL_NANOBANANA_QUEUE_SUBMIT, requestBody, 60, 2000, "Nano Banana Pro");
+    }
+
+    /**
+     * Generates a quick, cheap picture from a text prompt using Z-Image Turbo.
+     * @param prompt The text prompt (used as-is)
+     * @return The URL of the generated image
+     */
+    public String generatePictureZImage(String prompt, String imageSize) throws IOException, InterruptedException {
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("prompt", prompt);
+        requestBody.addProperty("image_size", imageSize); // "square_hd", "landscape_16_9", "portrait_16_9"
+        requestBody.addProperty("num_inference_steps", 8);
+        requestBody.addProperty("num_images", 1);
+        requestBody.addProperty("enable_safety_checker", true);
+        requestBody.addProperty("output_format", "png");
+        return pollImageResult(FAL_ZIMAGE_QUEUE_SUBMIT, requestBody, 30, 1000, "Z-Image Turbo");
+    }
+
+    /**
+     * Submits an image-generation request to a fal queue endpoint, polls until done,
+     * and returns the first image URL. Shared by the picture generators above.
+     */
+    private String pollImageResult(String endpoint, JsonObject requestBody, int maxAttempts,
+            long pollMillis, String label) throws IOException, InterruptedException {
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(requestBody)))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("{} queue submit error: {} - {}", label, submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit " + label + " request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        boolean completed = false;
+        int attempts = 0;
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(pollMillis);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException(label + " generation failed");
+                }
+            }
+        }
+        if (!completed) {
+            throw new IOException(label + " generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get {} result: {} - {}", label, resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get " + label + " result from fal");
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        String imageUrl = resultJson.getAsJsonArray("images")
+                .get(0).getAsJsonObject()
+                .get("url").getAsString();
+        LOGGER.info("{} picture generated: {}", label, imageUrl);
+        return imageUrl;
+    }
+
+    // ==================== VIDEO MODE: image -> video ====================
+
+    /**
+     * Fast image-to-video via LTX-2.3 fast. Returns the generated mp4 URL.
+     * @param imageUrl source image (public URL or base64 data URI)
+     * @param prompt   motion/scene description
+     */
+    public String generateVideoFast(String imageUrl, String prompt, String aspectRatio, int durationSeconds) throws IOException, InterruptedException {
+        // LTX fast accepts even durations 6..20; >10s requires 25 fps.
+        int d = Math.max(6, Math.min(20, durationSeconds));
+        if (d % 2 != 0) d = Math.min(20, d + 1);
+        JsonObject body = new JsonObject();
+        body.addProperty("image_url", imageUrl);
+        body.addProperty("prompt", prompt);
+        body.addProperty("duration", d);
+        body.addProperty("resolution", "1080p");   // fast model minimum
+        body.addProperty("fps", 25);                // 25 fps so all durations (incl. >10s) are valid
+        body.addProperty("aspect_ratio", aspectRatio); // "16:9", "9:16", or "auto" (LTX has no square)
+        body.addProperty("generate_audio", false);  // we don't play audio
+        return pollVideoResult(FAL_LTX_I2V_FAST_SUBMIT, body, 120, 3000, "LTX-2.3 fast");
+    }
+
+    /**
+     * Higher-quality image-to-video via Seedance 2.0. Returns the generated mp4 URL.
+     * @param imageUrl source image (public URL or base64 data URI)
+     * @param prompt   motion/scene description
+     */
+    public String generateVideoNormal(String imageUrl, String prompt, String aspectRatio, int durationSeconds) throws IOException, InterruptedException {
+        int d = Math.max(4, Math.min(15, durationSeconds)); // Seedance: 4..15
+        JsonObject body = new JsonObject();
+        body.addProperty("prompt", prompt);
+        body.addProperty("image_url", imageUrl);
+        body.addProperty("resolution", "480p");     // smallest -> lighter to decode for in-world playback
+        body.addProperty("duration", String.valueOf(d));
+        body.addProperty("aspect_ratio", aspectRatio); // "16:9", "9:16", "1:1", or "auto"
+        body.addProperty("generate_audio", false);
+        body.addProperty("bitrate_mode", "standard");
+        return pollVideoResult(FAL_SEEDANCE_I2V_SUBMIT, body, 160, 4000, "Seedance 2.0");
+    }
+
+    /** Submits an image-to-video request, polls until done, and returns the mp4 URL (result.video.url). */
+    private String pollVideoResult(String endpoint, JsonObject requestBody, int maxAttempts,
+            long pollMillis, String label) throws IOException, InterruptedException {
+        HttpRequest submitRequest = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Authorization", "Key " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(requestBody)))
+                .build();
+
+        HttpResponse<String> submitResponse = httpClient.send(submitRequest, HttpResponse.BodyHandlers.ofString());
+        if (submitResponse.statusCode() != 200) {
+            LOGGER.error("{} queue submit error: {} - {}", label, submitResponse.statusCode(), submitResponse.body());
+            throw new IOException("Failed to submit " + label + " request: " + submitResponse.statusCode());
+        }
+
+        JsonObject submitJson = GSON.fromJson(submitResponse.body(), JsonObject.class);
+        String responseUrl = submitJson.get("response_url").getAsString();
+        String statusUrl = submitJson.get("status_url").getAsString();
+
+        boolean completed = false;
+        int attempts = 0;
+        while (!completed && attempts < maxAttempts) {
+            Thread.sleep(pollMillis);
+            attempts++;
+
+            HttpRequest statusRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(statusUrl))
+                    .header("Authorization", "Key " + apiKey)
+                    .GET()
+                    .build();
+            HttpResponse<String> statusResponse = httpClient.send(statusRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (statusResponse.statusCode() == 200 || statusResponse.statusCode() == 202) {
+                JsonObject statusJson = GSON.fromJson(statusResponse.body(), JsonObject.class);
+                String status = statusJson.get("status").getAsString();
+                if ("COMPLETED".equals(status)) {
+                    completed = true;
+                } else if ("FAILED".equals(status)) {
+                    throw new IOException(label + " generation failed");
+                }
+            }
+        }
+        if (!completed) {
+            throw new IOException(label + " generation timed out after " + maxAttempts + " attempts");
+        }
+
+        HttpRequest resultRequest = HttpRequest.newBuilder()
+                .uri(URI.create(responseUrl))
+                .header("Authorization", "Key " + apiKey)
+                .GET()
+                .build();
+        HttpResponse<String> resultResponse = httpClient.send(resultRequest, HttpResponse.BodyHandlers.ofString());
+        if (resultResponse.statusCode() != 200) {
+            LOGGER.error("Failed to get {} result: {} - {}", label, resultResponse.statusCode(), resultResponse.body());
+            throw new IOException("Failed to get " + label + " result from fal");
+        }
+
+        JsonObject resultJson = GSON.fromJson(resultResponse.body(), JsonObject.class);
+        String videoUrl = resultJson.getAsJsonObject("video").get("url").getAsString();
+        LOGGER.info("{} video generated: {}", label, videoUrl);
+        return videoUrl;
     }
 }
 
