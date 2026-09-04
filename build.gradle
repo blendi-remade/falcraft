@@ -44,6 +44,22 @@ dependencies {
 	include "org.jcodec:jcodec-javase:0.2.5"
 }
 
+// Headless splat->voxel test harness (no Minecraft launch). Usage:
+//   gradlew voxelizeWorld "-Pspz=path\to\world.spz" "-Pjson=path\to\0-world.json" ["-Pbpm=1.0"] ...
+tasks.register('voxelizeWorld', JavaExec) {
+	group = 'falcraft'
+	description = 'Voxelize a Marble .spz (or .splat) world and write PLY/PNG previews'
+	classpath = sourceSets.client.runtimeClasspath
+	mainClass = 'com.falcraft.tools.WorldVoxelizerHarness'
+	def harnessArgs = []
+	['spz', 'glb', 'json', 'bpm', 'opacity', 'density', 'maxAxis', 'clip', 'belowGround', 'radiusM', 'out'].each { key ->
+		if (project.hasProperty(key)) {
+			harnessArgs += ["--${key}".toString(), project.property(key).toString()]
+		}
+	}
+	args = harnessArgs
+}
+
 processResources {
 	inputs.property "version", project.version
 

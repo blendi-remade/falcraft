@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Manages AI-generated image "canvases" displayed in the world as full-fidelity
@@ -87,6 +88,7 @@ public class ImageCanvasManager {
     private static final Map<String, ResourceLocation> textureCache = new HashMap<>();
     private static final Map<String, Double> aspectCache = new HashMap<>();
     private static final Map<String, VideoPlayback> videos = new HashMap<>();
+    private static final Map<String, LivePlayback> live = new HashMap<>();
     private static final java.util.Set<String> decoding = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Placed video canvases awaiting async decode at world load (id -> records to add once ready).
     private static final Map<String, List<CanvasRecord>> pendingVideoCanvases = new HashMap<>();
@@ -233,6 +235,77 @@ public class ImageCanvasManager {
                 vp.lastIdx = idx;
             }
         }
+    }
+
+    // ==================== LIVE STREAM PLAYBACK ====================
+    // A "live" canvas is a fixed-size DynamicTexture fed by an external frame
+    // source (the Director bridge) instead of a decoded file. Frames arrive on
+    // a network thread into an AtomicReference and are drained onto the render
+    // thread by tickLive(), which naturally drops frames to the tick rate.
+
+    private static final class LivePlayback {
+        final DynamicTexture tex;
+        final int width, height;
+        final AtomicReference<NativeImage> pending = new AtomicReference<>();
+        LivePlayback(DynamicTexture tex, int width, int height) {
+            this.tex = tex;
+            this.width = width;
+            this.height = height;
+        }
+    }
+
+    /** Registers a live canvas at a fixed resolution (render thread). Idempotent. */
+    public static void registerLive(String id, int width, int height) {
+        if (live.containsKey(id)) return;
+        aspectCache.put(id, width > 0 ? (double) height / width : 1.0);
+        NativeImage blank = new NativeImage(width, height, false);
+        DynamicTexture tex = new DynamicTexture(blank);
+        ResourceLocation loc = ResourceLocation.fromNamespaceAndPath("falcraft", "canvas/" + id);
+        // A live id may reuse a placeholder texture slot; register replaces it.
+        Minecraft.getInstance().getTextureManager().register(loc, tex);
+        textureCache.put(id, loc);
+        live.put(id, new LivePlayback(tex, width, height));
+        LOGGER.info("Registered live canvas {} ({}x{})", id, width, height);
+    }
+
+    public static boolean isLive(String id) {
+        return live.containsKey(id);
+    }
+
+    /** Hands the newest frame to a live canvas (any thread). Dimensions must match. */
+    public static void pushLiveFrame(String id, NativeImage frame) {
+        LivePlayback lp = live.get(id);
+        if (lp == null || frame.getWidth() != lp.width || frame.getHeight() != lp.height) {
+            frame.close();
+            return;
+        }
+        NativeImage prev = lp.pending.getAndSet(frame);
+        if (prev != null) prev.close(); // an undrained frame is stale; drop it
+    }
+
+    /** Uploads the latest frame of each live canvas. Called each client tick. */
+    public static void tickLive() {
+        if (live.isEmpty()) return;
+        for (LivePlayback lp : live.values()) {
+            NativeImage frame = lp.pending.getAndSet(null);
+            if (frame == null) continue;
+            try {
+                if (lp.tex.getPixels() != null) {
+                    lp.tex.getPixels().copyFrom(frame);
+                    lp.tex.upload();
+                }
+            } finally {
+                frame.close();
+            }
+        }
+    }
+
+    /** Stops a live canvas but keeps its texture (freezes on the last frame). */
+    public static void stopLive(String id) {
+        LivePlayback lp = live.remove(id);
+        if (lp == null) return;
+        NativeImage pending = lp.pending.getAndSet(null);
+        if (pending != null) pending.close();
     }
 
     private static NativeImage cloneImage(NativeImage src) {
@@ -555,6 +628,11 @@ public class ImageCanvasManager {
             }
         }
         videos.clear();
+        for (LivePlayback lp : live.values()) {
+            NativeImage pending = lp.pending.getAndSet(null);
+            if (pending != null) pending.close();
+        }
+        live.clear();
         textureCache.clear();
         aspectCache.clear();
         pendingVideoCanvases.clear();

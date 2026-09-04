@@ -1,0 +1,16 @@
+{
+  "name": "falcraft-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local bridge that holds a MiniMax H3 Max Director WebRTC session in headless Chrome and relays frames to the falcraft Minecraft mod over localhost.",
+  "scripts": {
+    "start": "node bridge.mjs"
+  },
+  "dependencies": {
+    "@fal-ai/client": "alpha",
+    "esbuild": "^0.25.0",
+    "playwright-core": "^1.50.0",
+    "ws": "^8.18.0"
+  }
+}

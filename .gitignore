@@ -50,3 +50,5 @@ replay_*.log
 .env*
 
 reference/
+# runtime logs
+logs/

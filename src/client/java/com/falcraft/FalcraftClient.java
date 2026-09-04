@@ -9,6 +9,9 @@ import com.falcraft.commands.SplatCommand;
 import com.falcraft.commands.ImageCommand;
 import com.falcraft.commands.VideoCommand;
 import com.falcraft.commands.StreamCommand;
+import com.falcraft.commands.TvCommand;
+import com.falcraft.commands.WorldCommand;
+import com.falcraft.util.DirectorBridge;
 import com.falcraft.render.GhostBlockRenderer;
 import com.falcraft.render.HotbarCanvasOverlay;
 import com.falcraft.render.ImageCanvasRenderer;
@@ -64,6 +67,25 @@ public class FalcraftClient implements ClientModInitializer {
             SplatCommand.register(dispatcher);   // Nano Banana Pro + TripoSplat (experimental)
             ImageCommand.register(dispatcher);   // AI image -> in-world canvas
             VideoCommand.register(dispatcher);   // image -> looping video canvas
+            WorldCommand.register(dispatcher);   // Marble world splat -> voxel world (local .spz for now)
+            TvCommand.register(dispatcher);      // FalTV: live Director broadcast on a canvas
+        });
+
+        // FalTV steering: any chat line starting with "!" steers the live show
+        // instead of being sent to chat.
+        net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
+            String trimmed = message.strip();
+            if (!trimmed.startsWith("!") || trimmed.length() < 2) return true;
+            DirectorBridge bridge = DirectorBridge.get();
+            if (bridge.getActiveId() == null) return true; // no TV on: send normally
+            String steer = trimmed.substring(1).strip();
+            if (steer.isEmpty()) return true;
+            bridge.steer(steer);
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player != null) {
+                mc.player.displayClientMessage(Component.literal("§d[fal] 📺 steering: §f" + steer), false);
+            }
+            return false; // swallow the chat line
         });
 
         // Register ghost block renderer for placement preview
@@ -115,6 +137,8 @@ public class FalcraftClient implements ClientModInitializer {
             ImageCanvasManager.tickLoad(client);
             // Advance any playing video canvases
             ImageCanvasManager.tickVideos();
+            // Upload the newest frame of any live (FalTV) canvas
+            ImageCanvasManager.tickLive();
 
             if (client.player == null) return;
 
