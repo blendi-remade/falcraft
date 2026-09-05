@@ -83,6 +83,32 @@ For UV-textured models (~7 minutes):
 /fal generate legacy <size> <prompt>
 ```
 
+### FalTV (Live AI Television)
+
+An endless, live-generated TV channel playing on a wall in your world, rendered in real time by [MiniMax H3 Max Director](https://fal.ai/models/minimax/h3-max/director) and steered from chat. One continuous stream, no clips, no stitching.
+
+![FalTV: a live Director broadcast on an in-world canvas](docs/faltv.png)
+
+```
+/fal tv news                                          # presets: news, minecraft, cooking, nature,
+                                                      #          horror, space, wrestling, aquarium
+/fal tv a cooking show where everything is on fire    # or freeform: any words
+!the anchor gets breaking news about a dragon         # steer the live show from chat
+/fal tv off
+```
+
+The command hands you a TV map item. Hold it and right-click a wall to hang it (same H/N/G/F controls as any falcraft canvas).
+
+The Director API is WebRTC-only, so FalTV needs a small local sidecar that holds the session in headless Chrome and relays frames to the mod. Start it before tuning a channel:
+
+```bash
+cd bridge && npm install
+npm start               # video only
+npm run start:audio     # also play the broadcast's audio through your speakers
+```
+
+The bridge finds your fal key the same way the mod does. Sessions cap at about two minutes; the bridge retunes automatically with the show's recent steers so the channel keeps going. Single-player only. See [bridge/README.md](bridge/README.md) for details and cost notes.
+
 ## 🕹️ Placement Controls
 
 All generation modes share the same placement preview. A ghost block preview appears after generation, and you can adjust it before placing.

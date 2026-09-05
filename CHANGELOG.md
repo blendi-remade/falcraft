@@ -2,6 +2,15 @@
 
 All notable changes to Falcraft will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **FalTV**: `/fal tv <channel|prompt>` plays an endless, live-generated TV broadcast (MiniMax H3 Max Director) on an in-world canvas, steered from chat with `!...` lines. `/fal tv off` stops it.
+- `bridge/`: local Node + headless-Chrome sidecar that holds the Director WebRTC session and relays frames to the mod. `npm run start:audio` plays the broadcast's audio through your speakers.
+
+### Fixed
+- FalTV frames now decode via ImageIO. Minecraft's `NativeImage.read` is PNG-only in 1.21.1, so JPEG frames were silently dropped and the TV stayed black.
+
 ## [1.0.0] - 2024-12-08
 
 ### Added

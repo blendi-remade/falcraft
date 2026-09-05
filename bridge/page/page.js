@@ -16,6 +16,9 @@ const MAX_RECONNECTS = 50;
 const params = new URLSearchParams(location.search);
 const key = params.get("key");
 const wsUrl = params.get("ws") || "ws://127.0.0.1:4783/page";
+// With --audio the bridge runs a headed Chrome and we let the <video> element
+// play the broadcast's audio track out loud.
+const AUDIO = params.get("audio") === "1";
 
 const fal = createFalClient({ credentials: key });
 const video = document.getElementById("v");
@@ -81,6 +84,8 @@ function openSession(configurePrompt) {
     receive: ["video", "audio"],
     onMedia: (stream) => {
       video.srcObject = stream;
+      video.muted = !AUDIO;
+      video.volume = 1;
       video.play().catch((e) => log("play failed", e?.message));
       startPump();
       send({ type: "state", state: "live" });

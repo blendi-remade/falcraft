@@ -4,7 +4,11 @@
 //   mod  ⇄  ws://127.0.0.1:4783/mod   (JPEG frames down, JSON control up)
 //   page ⇄  ws://127.0.0.1:4783/page  (headless Chrome running the fal client)
 //
-//   node bridge.mjs [--key FAL_KEY] [--port 4783] [--show]
+//   node bridge.mjs [--key FAL_KEY] [--port 4783] [--show] [--audio]
+//
+//   --audio plays the broadcast's audio through your speakers from the bridge's
+//   Chrome (headless Chrome has no audio sink, so this opens a real window,
+//   parked off-screen). --show opens it on-screen so you can watch the page.
 //
 // The key is read from --key, FAL_KEY / FAL_API_KEY, ../run/.env, the
 // Minecraft .env, or config/falcraft/api-key.txt (same places the mod looks).
@@ -27,6 +31,7 @@ const flag = (name) => {
 const PORT = Number(flag("--port") ?? 4783);
 const PAGE_PORT = PORT + 1;
 const SHOW = args.includes("--show");
+const AUDIO = args.includes("--audio");
 
 // --- key ---------------------------------------------------------------
 function readEnvKey(file) {
@@ -146,9 +151,14 @@ console.log(`bridge listening on ws://127.0.0.1:${PORT}/mod`);
 
 // --- headless chrome ---------------------------------------------------
 async function launchBrowser() {
+  // Audio needs a headed Chrome; without --show, park the window off-screen.
+  const headed = SHOW || AUDIO;
   const opts = {
-    headless: !SHOW,
+    headless: !headed,
+    // Playwright mutes Chrome by default; drop that switch when we want sound.
+    ignoreDefaultArgs: AUDIO ? ["--mute-audio"] : [],
     args: [
+      ...(headed && !SHOW ? ["--window-position=-32000,-32000", "--window-size=320,180"] : []),
       "--autoplay-policy=no-user-gesture-required",
       "--use-fake-ui-for-media-stream",
       "--disable-web-security",
@@ -171,8 +181,9 @@ tab.on("console", (m) => {
   console.log(t);
 });
 tab.on("pageerror", (e) => console.log("page error:", e.message));
-const url = `http://127.0.0.1:${PAGE_PORT}/?key=${encodeURIComponent(KEY)}&ws=${encodeURIComponent(`ws://127.0.0.1:${PORT}/page`)}`;
+const url = `http://127.0.0.1:${PAGE_PORT}/?key=${encodeURIComponent(KEY)}&ws=${encodeURIComponent(`ws://127.0.0.1:${PORT}/page`)}${AUDIO ? "&audio=1" : ""}`;
 await tab.goto(url);
+console.log(AUDIO ? "audio: playing through this machine's speakers" : "audio: off (start with --audio to hear the broadcast)");
 console.log("chrome ready. In Minecraft: /fal tv <channel>, then type !anything to steer.");
 
 const shutdown = async () => {

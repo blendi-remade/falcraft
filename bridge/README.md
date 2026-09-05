@@ -20,6 +20,7 @@ Minecraft mod  ⇄  ws://127.0.0.1:4783/mod   ⇄  bridge (Node + headless Chrom
 cd bridge
 npm install
 npm start          # add --show to watch the headless page, --key <FAL_KEY> to override
+npm run start:audio   # same, plus the broadcast's audio through your speakers
 ```
 
 The bridge finds your fal key the same way the mod does: `--key`, `FAL_KEY` /
@@ -48,5 +49,6 @@ as any falcraft canvas: H/N size, G rotate, F snap).
   recent steers so the broadcast continues; the mod shows a brief "signal
   break" while it reconnects.
 - **One session per machine.** Run one bridge at a time.
-- Audio is not played in-world yet (the mod has no audio path); the broadcast
-  is silent for now.
+- **Audio**: `npm run start:audio` (or `--audio`) plays the broadcast's audio
+  through your speakers from the bridge's Chrome. It is not positional in the
+  world yet; in-world OpenAL playback is a possible follow-up.

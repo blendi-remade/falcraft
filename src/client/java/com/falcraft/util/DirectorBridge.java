@@ -8,8 +8,11 @@ import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
@@ -46,6 +49,14 @@ public final class DirectorBridge {
     // Buffers binary fragments of one frame until the final fragment arrives.
     private final ByteArrayOutputStream frameBuf = new ByteArrayOutputStream(64 * 1024);
     private final AtomicReference<Runnable> onReady = new AtomicReference<>();
+    private long framesOk;
+    private long framesBad;
+
+    static {
+        // ImageIO spools ImageInputStreams to temp files by default; 15 frames/s
+        // of that is pointless disk churn.
+        ImageIO.setUseCache(false);
+    }
 
     private DirectorBridge() {}
 
@@ -160,11 +171,41 @@ public final class DirectorBridge {
         String id = activeId;
         if (id == null) return;
         try {
-            NativeImage img = NativeImage.read(new ByteArrayInputStream(jpeg));
+            NativeImage img = decodeJpeg(jpeg);
             ImageCanvasManager.pushLiveFrame(id, img);
+            if (framesOk++ == 0) LOGGER.info("First TV frame decoded ({}x{})", img.getWidth(), img.getHeight());
         } catch (Exception e) {
-            // A torn frame is not worth logging every time.
+            // Log the first failure and then only occasionally; a torn frame is
+            // not worth a log line every time, but silent failure is worse.
+            if (framesBad++ % 300 == 0) {
+                LOGGER.warn("TV frame decode failed ({} bad so far): {}", framesBad, e.toString());
+            }
         }
+    }
+
+    /**
+     * Decodes a JPEG into a NativeImage. {@link NativeImage#read} is PNG-only
+     * (it validates the PNG signature before calling STB), so JPEG goes through
+     * ImageIO and is repacked into NativeImage's ABGR layout.
+     */
+    private static NativeImage decodeJpeg(byte[] jpeg) throws IOException {
+        BufferedImage bi = ImageIO.read(new ByteArrayInputStream(jpeg));
+        if (bi == null) throw new IOException("ImageIO returned null (not a decodable image)");
+        int w = bi.getWidth();
+        int h = bi.getHeight();
+        int[] argb = bi.getRGB(0, 0, w, h, null, 0, w);
+        NativeImage img = new NativeImage(NativeImage.Format.RGBA, w, h, false);
+        for (int y = 0; y < h; y++) {
+            int row = y * w;
+            for (int x = 0; x < w; x++) {
+                int p = argb[row + x];
+                int r = (p >> 16) & 0xFF;
+                int g = (p >> 8) & 0xFF;
+                int b = p & 0xFF;
+                img.setPixelRGBA(x, y, 0xFF000000 | (b << 16) | (g << 8) | r);
+            }
+        }
+        return img;
     }
 
     private void feedback(String msg) {
