@@ -57,9 +57,11 @@ public class BlockPlacer {
                 level = clientLevel;
             }
         } else {
-            // Multiplayer: we can only place on client side (won't persist)
-            level = minecraft.level;
-            LOGGER.warn("Multiplayer detected - blocks may not persist! Consider using a server-side mod.");
+            // Dedicated server / multiplayer: PlacementPreview.tickAnimatedPlacement()
+            // handles sending the C2S packet via ClientPlayNetworking.  BlockPlacer is
+            // not used in the multiplayer path, so if we somehow end up here just warn.
+            LOGGER.warn("BlockPlacer.placeVoxelGrid called in multiplayer context; use PlacementPreview instead.");
+            return 0;
         }
         
         if (level == null) {
